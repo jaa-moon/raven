@@ -1,0 +1,182 @@
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  Raven Security Scan — GitHub Actions Workflow                          │
+# │  Phase 7 CI/CD Integration                                              │
+# │                                                                         │
+# │  Triggers:                                                              │
+# │    • Every push to main / master                                        │
+# │    • Every pull_request (diff mode — only changed files)                │
+# │    • Manual dispatch (workflow_dispatch) for full scans                 │
+# │                                                                         │
+# │  Exit code contract:                                                    │
+# │    0 → scan passed (no findings at or above --fail-on threshold)        │
+# │    1 → scan failed (findings found above threshold)                     │
+# │    2 → scan error  (provider unavailable, project unreadable, etc.)     │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+name: Raven Security Scan
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/raven-scan.yml"   # don't scan ourselves recursively
+
+  pull_request:
+    branches: [main, master]
+    # All file types — diff_scanner.py handles extension filtering
+
+  workflow_dispatch:
+    inputs:
+      fail_on:
+        description: "Severity threshold (critical|high|medium|low|none)"
+        required: false
+        default: "high"
+      full_scan:
+        description: "Force full scan (ignore diff mode on PRs)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+# Cancel in-progress runs on the same branch to save runner minutes
+concurrency:
+  group: raven-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write    # Required for PR comment annotation
+
+env:
+  # ── Raven configuration ────────────────────────────────────────────────
+  RAVEN_RESULTS_JSON: raven-results.json
+  RAVEN_BADGE_JSON:   raven-badge.json
+  PYTHON_VERSION:     "3.11"
+  FAIL_ON: ${{ github.event.inputs.fail_on || 'high' }}
+
+jobs:
+  raven-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch enough history so git diff can find the merge base.
+          # 50 commits covers the vast majority of PR branch lengths.
+          fetch-depth: 50
+
+      # ── 2. Set up Python ───────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── 3. Install Raven dependencies ──────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Install optional scanner tools (best-effort)
+          pip install bandit pip-audit 2>/dev/null || true
+
+      # ── 4. Determine scan flags ────────────────────────────────────────────
+      # Diff mode is active on PRs unless the user requests a full scan
+      - name: Compute scan flags
+        id: flags
+        run: |
+          EXTRA_FLAGS=""
+
+          # PR events get diff mode automatically (unless overridden)
+          if [[ "${{ github.event_name }}" == "pull_request" && \
+                "${{ github.event.inputs.full_scan }}" != "true" ]]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --diff"
+            echo "pr_mode=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_mode=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "extra_flags=$EXTRA_FLAGS" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Run Raven scan ──────────────────────────────────────────────────
+      # `continue-on-error: true` lets us capture the exit code before
+      # GitHub Actions swallows it. We re-raise it in step 8.
+      - name: Run Raven scan
+        id: raven
+        continue-on-error: true
+        env:
+          # Forward any provider keys the repo has stored as secrets.
+          # Set whichever of these your project uses; unused vars are harmless.
+          OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          RAVEN_BASE_BRANCH:  ${{ github.base_ref && format('origin/{0}', github.base_ref) || '' }}
+          PYTHONPATH:         ${{ github.workspace }}
+        run: |
+          python -m raven scan . \
+            --fail-on "${{ env.FAIL_ON }}" \
+            --output-json "${{ env.RAVEN_RESULTS_JSON }}" \
+            ${{ steps.flags.outputs.extra_flags }}
+
+          # Capture exit code BEFORE continue-on-error resets it to 0
+          echo "RAVEN_EXIT_CODE=$?" >> "$GITHUB_ENV"
+
+      # ── 6. Upload results artefact ─────────────────────────────────────────
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raven-results-${{ github.run_id }}
+          path: |
+            ${{ env.RAVEN_RESULTS_JSON }}
+            ${{ env.RAVEN_BADGE_JSON }}
+            reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── 7. Post PR comment ─────────────────────────────────────────────────
+      - name: Post PR comment
+        if: github.event_name == 'pull_request' && always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          PYTHONPATH:        ${{ github.workspace }}
+        run: |
+          if [ -f "${{ env.RAVEN_RESULTS_JSON }}" ]; then
+            python ci/pr_reporter.py --results "${{ env.RAVEN_RESULTS_JSON }}"
+          else
+            echo "No results JSON found; skipping PR comment."
+          fi
+
+      # ── 8. Enforce exit code (re-raise after artefact upload) ──────────────
+      # By doing this as the final step, we ensure artefacts and PR comments
+      # are posted even when findings are found, but the job still fails.
+      - name: Enforce exit code
+        if: always()
+        run: |
+          CODE="${RAVEN_EXIT_CODE:-0}"
+          echo "Raven exit code: $CODE"
+          if [ "$CODE" = "1" ]; then
+            echo "::error title=Raven Security Scan::Findings detected above the --fail-on threshold. See the scan results artefact for details."
+            exit 1
+          elif [ "$CODE" = "2" ]; then
+            echo "::error title=Raven Security Scan::Scan failed to complete. Check the logs above."
+            exit 2
+          fi
+          echo "Scan passed (exit 0)."
+
+  # ── Workflow status badge (optional) ────────────────────────────────────────
+  # The badge JSON file is uploaded as an artefact above.  To use it in your
+  # README, host it on a CDN (e.g. GitHub Pages) and embed:
+  #
+  #   ![Raven Security](https://img.shields.io/endpoint?url=<BADGE_URL>)
+  #
+  # No additional job is required — the badge is built inline by the scan step.

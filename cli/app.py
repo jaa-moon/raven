@@ -1,0 +1,283 @@
+"""
+cli/app.py
+----------
+Main Typer CLI application for Raven.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+import typer
+
+# Ensure stdout/stderr encoding handles Unicode characters gracefully on Windows
+if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") not in ("utf8", "utf16"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except AttributeError:
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+from config.manager import ConfigManager
+from orchestrator.orchestrator import run_scan
+from reports.models import RavenConfig
+from reports.report_generator import ReportGenerator
+from ui.banner import print_banner
+from ui.console import console
+from ui.setup_wizard import run_setup_wizard
+
+app = typer.Typer(
+    name="raven",
+    help="Raven — Autonomous CLI Pentesting Agent",
+    no_args_is_help=True
+)
+
+
+@app.command("scan")
+def scan(
+    path: str = typer.Argument(".", help="Target project path"),
+    depth: str = typer.Option("standard", "--depth", "-d", help="Scan depth: quick, standard, deep"),
+    no_docker: bool = typer.Option(False, "--no-docker", help="Disable Docker sandbox and force local process fallback"),
+    agent: str = typer.Option("both", "--agent", "-a", help="Agent selection: both, web, auth"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override configured LLM model"),
+    output_json: Optional[str] = typer.Option(None, "--output-json", help="Path to output JSON report"),
+    fail_on: str = typer.Option("none", "--fail-on", help="Severity threshold to fail with exit code 1 (critical, high, medium, low, none)"),
+    diff: bool = typer.Option(False, "--diff", help="Incremental scan: only analyze files changed vs. base branch"),
+) -> None:
+    """
+    Run full autonomous pentest against a project directory.
+    """
+    target = Path(path).resolve()
+    if not target.exists():
+        console.print(f"[bold red]Error:[/] Target path '{target}' does not exist.")
+        raise typer.Exit(code=1)
+
+    # Diff mode: filter target files to only changed ones
+    changed_files = None
+    if diff:
+        try:
+            from ci.diff_scanner import get_changed_files
+            changed_files = get_changed_files(repo_root=target)
+            if not changed_files:
+                console.print("[bold green]+ No scannable files changed. Exiting clean.[/]")
+                raise typer.Exit(code=0)
+            console.print(f"[dim]Diff mode: {len(changed_files)} changed file(s) detected.[/]")
+        except Exception as e:
+            console.print(f"[bold yellow]WARNING:[/] Diff mode failed ({e}), falling back to full scan.")
+
+    mgr = ConfigManager()
+    cfg_data = mgr.load() or {}
+
+    raven_cfg = RavenConfig(
+        provider=cfg_data.get("provider", "ollama"),
+        model=model or cfg_data.get("model", "qwen2.5:7b"),
+        api_key=cfg_data.get("api_key"),
+        depth=depth,  # type: ignore
+        no_docker=no_docker,
+        agent_mode=agent  # type: ignore
+    )
+
+    console.print(f"\n[bold magenta][+] Starting Raven Autonomous Pentest[/] against [cyan]{target}[/]\n")
+
+    report = asyncio.run(run_scan(target, raven_cfg))
+
+    # Set scan_end timestamp
+    report.scan_end = datetime.now().isoformat()
+
+    generator = ReportGenerator(report)
+
+    # Save reports — honour --output-json if provided
+    md_path, json_path = generator.save(target, output_json_path=output_json)
+
+    # Generate badge JSON alongside the JSON report
+    try:
+        from ci.badge_generator import generate_badge
+        badge_path = Path(json_path).parent / "raven-badge.json"
+        generate_badge(str(badge_path), results_json_path=json_path)
+    except Exception:
+        pass
+
+    console.print("\n[bold green]+ Pentest completed successfully![/]")
+    console.print(f"  [bold]Risk Score:[/] [bold red]{report.risk_score}/10.0 ({report.risk_label})[/]")
+    console.print(f"  [bold]Markdown Report:[/] [cyan]{md_path}[/]")
+    console.print(f"  [bold]JSON Report:[/] [cyan]{json_path}[/]\n")
+
+    # Exit code logic for CI: --fail-on threshold
+    if fail_on != "none":
+        severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        threshold = severity_rank.get(fail_on.lower(), 99)
+        all_findings = report.agent_1_findings + report.agent_2_findings
+        for f in all_findings:
+            finding_rank = severity_rank.get(f.severity.lower(), 99)
+            if finding_rank <= threshold:
+                console.print(f"[bold red]FAIL:[/] Finding [{f.severity}] {f.vulnerability_type} exceeds --fail-on {fail_on}")
+                raise typer.Exit(code=1)
+        console.print(f"[bold green]PASS:[/] No findings at or above --fail-on {fail_on} threshold.")
+
+
+@app.command("webscan")
+def webscan(
+    url: str = typer.Argument(..., help="Target URL to scan (e.g. https://example.com)"),
+    depth: int = typer.Option(3, "--depth", "-d", help="Crawl depth"),
+    max_pages: int = typer.Option(100, "--max-pages", help="Maximum pages to crawl"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override configured LLM model"),
+    output_json: Optional[str] = typer.Option(None, "--output-json", help="Path to output JSON report"),
+    no_robots: bool = typer.Option(False, "--no-robots", help="Ignore robots.txt directives"),
+) -> None:
+    """
+    Run active web vulnerability scan against a live URL (DAST mode).
+    """
+    import time as _time
+    from pathlib import Path as _Path
+    from dataclasses import asdict
+
+    from web.crawler import RavenCrawler
+    from web.fingerprinter import SiteFingerprinter
+    from web.probe_engine import ProbeEngine
+    from web.web_report_generator import generate_web_report
+    from core.models import WebScanReport
+    from providers.factory import get_provider
+
+    mgr = ConfigManager()
+    cfg_data = mgr.load() or {}
+
+    console.print(f"\n[bold magenta][+] Starting Raven Web Scan[/] against [cyan]{url}[/]")
+    console.print("[bold yellow]⚠  This sends active payloads to the target. Only scan targets you own or have authorization to test.[/]\n")
+
+    confirm = typer.confirm("Do you confirm you are authorized to scan this target?")
+    if not confirm:
+        console.print("[red]Scan aborted.[/]")
+        raise typer.Exit(code=0)
+
+    scan_start = _time.time()
+
+    # Step 1: Crawl
+    console.print("[dim]Step 1/3: Crawling target...[/]")
+    crawler = RavenCrawler(
+        base_url=url,
+        max_depth=depth,
+        max_pages=max_pages,
+        respect_robots=not no_robots,
+    )
+    crawl_result = crawler.crawl()
+    total_forms = sum(len(p.forms) for p in crawl_result.pages)
+    total_params = sum(len(p.query_params) for p in crawl_result.pages)
+    console.print(f"  Discovered [cyan]{crawl_result.total_crawled}[/] pages, [cyan]{total_forms}[/] forms, [cyan]{total_params}[/] query parameters")
+
+    # Step 2: Fingerprint
+    console.print("[dim]Step 2/3: Fingerprinting technology stack...[/]")
+    fingerprinter = SiteFingerprinter()
+    site_fp = fingerprinter.fingerprint(crawl_result)
+    techs = ", ".join(site_fp.detected_technologies) or "Unknown"
+    console.print(f"  Technologies: [cyan]{techs}[/]")
+    console.print(f"  Server: [cyan]{site_fp.server_header or 'Unknown'}[/]")
+    if site_fp.missing_security_headers:
+        console.print(f"  [yellow]Missing headers: {', '.join(site_fp.missing_security_headers)}[/]")
+    if site_fp.interesting_paths:
+        console.print(f"  [yellow]Interesting paths: {', '.join(site_fp.interesting_paths[:5])}[/]")
+
+    # Step 3: Active Probe
+    console.print("[dim]Step 3/3: Probing for vulnerabilities...[/]")
+    provider_cfg = {
+        "provider": cfg_data.get("provider", "ollama"),
+        "model": model or cfg_data.get("model", "qwen2.5:7b"),
+        "api_key": cfg_data.get("api_key"),
+    }
+    provider = get_provider(provider_cfg)
+    probe_engine = ProbeEngine(provider=provider, fingerprint=site_fp)
+    findings = probe_engine.probe_all(crawl_result)
+    console.print(f"  Found [cyan]{len(findings)}[/] confirmed vulnerabilities")
+
+    scan_duration = _time.time() - scan_start
+
+    # Build severity counts
+    sev_counts: dict = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
+    for f in findings:
+        sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
+
+    # Build fingerprint dict for report
+    fp_dict = {
+        "detected_technologies": site_fp.detected_technologies,
+        "server_header": site_fp.server_header,
+        "security_headers": {
+            name: {"present": hs.present, "value": hs.value, "secure": hs.secure}
+            for name, hs in site_fp.security_headers.items()
+        },
+        "missing_security_headers": site_fp.missing_security_headers,
+        "cookies": [
+            {
+                "name": c.name,
+                "has_httponly": c.has_httponly,
+                "has_secure": c.has_secure,
+                "has_samesite": c.has_samesite,
+            }
+            for c in site_fp.cookies
+        ],
+        "interesting_paths": site_fp.interesting_paths,
+        "information_disclosures": site_fp.information_disclosures,
+        "tls_info": site_fp.tls_info,
+    }
+
+    report = WebScanReport(
+        target=url,
+        scan_duration_seconds=scan_duration,
+        fingerprint=fp_dict,
+        findings=findings,
+        findings_by_severity=sev_counts,
+        total_findings=len(findings),
+    )
+
+    json_out = _Path(output_json) if output_json else None
+    md_path = generate_web_report(report, output_json=json_out)
+
+    console.print(f"\n[bold green]+ Web scan completed![/]  Duration: {scan_duration:.1f}s")
+    console.print(f"  [bold]Findings:[/] {len(findings)} ({sev_counts.get('Critical', 0)} Critical, {sev_counts.get('High', 0)} High)")
+    console.print(f"  [bold]Report:[/] [cyan]{md_path}[/]\n")
+
+
+
+
+@app.command("setup")
+def setup() -> None:
+    """
+    Run interactive setup wizard.
+    """
+    cfg = run_setup_wizard(console, reconfigure=True)
+    if cfg:
+        mgr = ConfigManager()
+        mgr.save(cfg)
+        console.print("[bold green]+ Configuration saved successfully![/]")
+
+
+@app.command("report")
+def report(scan_id: str = typer.Argument(..., help="Scan ID string")) -> None:
+    """
+    Re-display past scan report.
+    """
+    # Search CWD and common report locations
+    search_roots = [Path("."), Path.home() / ".raven"]
+    matches = []
+    for root in search_roots:
+        matches.extend(root.glob(f"**/raven_report_{scan_id}*.md"))
+
+    if not matches:
+        console.print(f"[bold red]Report for scan ID '{scan_id}' not found.[/]")
+        raise typer.Exit(code=1)
+
+    content = matches[0].read_text(encoding="utf-8")
+    console.print(content)
+
+
+@app.command("version")
+def version() -> None:
+    """Print Raven version info."""
+    print_banner(console)
+    console.print("  [bold magenta]Raven Autonomous Pentesting Agent[/] v2.1.0\n")
+
+
+if __name__ == "__main__":
+    app()

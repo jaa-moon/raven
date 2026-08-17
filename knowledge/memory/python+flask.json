@@ -1,0 +1,56 @@
+[
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "VulnerableDependency",
+    "payload_template": "",
+    "success_rate": 1.0,
+    "scan_count": 6,
+    "confirmed_count": 6,
+    "last_seen": "2026-07-28T15:49:41.194409"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "Reflected XSS",
+    "payload_template": "<script>alert('RAVEN')</script>",
+    "success_rate": 1.0,
+    "scan_count": 1,
+    "confirmed_count": 1,
+    "last_seen": "2026-08-15T17:08:33.055725"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "Server-Side Template Injection",
+    "payload_template": "{{7*7}}",
+    "success_rate": 1.0,
+    "scan_count": 1,
+    "confirmed_count": 1,
+    "last_seen": "2026-08-15T17:08:33.097525"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "OS Command Injection",
+    "payload_template": "127.0.0.1 & echo RAVEN_CMD_INJ",
+    "success_rate": 1.0,
+    "scan_count": 2,
+    "confirmed_count": 2,
+    "last_seen": "2026-08-15T17:08:33.137175"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "Server-Side Request Forgery",
+    "payload_template": "http://169.254.169.254/latest/meta-data/",
+    "success_rate": 1.0,
+    "scan_count": 1,
+    "confirmed_count": 1,
+    "last_seen": "2026-08-15T17:08:33.156019"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "SQL Injection",
+    "payload_template": "' OR '1'='1",
+    "success_rate": 1.0,
+    "scan_count": 12,
+    "confirmed_count": 12,
+    "last_seen": "2026-08-15T17:08:33.186008"
+  }
+]

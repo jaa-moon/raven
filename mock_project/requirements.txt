@@ -1,0 +1,4 @@
+# Python requirements mock
+Flask>=2.3.0
+sqlalchemy>=1.4.0
+requests
