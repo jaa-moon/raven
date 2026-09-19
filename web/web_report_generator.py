@@ -54,12 +54,56 @@ def generate_web_report(report: WebScanReport, output_json: Path | None = None) 
             md.append(f"- **`{cookie['name']}`**: {', '.join(flags)}")
         md.append("")
 
-    # Interesting Paths
+    # Interesting Paths (validated/protected only — see Path Discovery Summary
+    # below for the full picture, including SPA-fallback and inconclusive paths)
     if "interesting_paths" in report.fingerprint and report.fingerprint["interesting_paths"]:
         md.append("### Interesting Paths Found")
         for path in report.fingerprint["interesting_paths"]:
             md.append(f"- `{path}`")
         md.append("")
+
+    # ── Path Discovery Summary ──────────────────────────────────────────────
+    if report.path_discoveries:
+        s = report.path_discovery_summary
+        md.extend([
+            "---",
+            "",
+            "## 🧭 Path Discovery Summary",
+            "",
+            "HTTP 200 alone never confirms a vulnerability. Every candidate path is "
+            "compared against a baseline response for a guaranteed-nonexistent route "
+            "and, if it survives that check, run through a content-specific validator "
+            "before being called a real exposure.",
+            "",
+            "```text",
+            f"Candidate paths tested: {s.get('candidate_paths_tested', 0)}",
+            f"Likely SPA fallback responses: {s.get('likely_spa_fallback', 0)}",
+            f"Confirmed sensitive-file exposures: {s.get('confirmed_sensitive_file_exposures', 0)}",
+            f"Confirmed admin interfaces: {s.get('confirmed_admin_interfaces', 0)}",
+            f"Inconclusive findings: {s.get('inconclusive_findings', 0)}",
+            f"Protected resources: {s.get('protected_resources', 0)}",
+            f"False positives: {s.get('false_positives', 0)}",
+            "```",
+            "",
+            "### Candidate Path Detail",
+            "",
+        ])
+        for d in report.path_discoveries:
+            md.extend([
+                f"**Path**: `{d.path}`  ",
+                f"**Status**: {d.http_status}  ",
+                f"**Content-Type**: `{d.content_type or 'unknown'}`  ",
+                f"**Classification**: `{d.classification}`  ",
+                f"**Validation**: {'confirmed' if d.validation_state == 'confirmed' else 'not confirmed'} "
+                f"(state: `{d.validation_state}`)  ",
+                f"**Confidence**: {d.confidence}  ",
+            ])
+            if d.evidence:
+                md.append(f"**Evidence**: {'; '.join(d.evidence)}  ")
+            md.extend([
+                f"**Reason**: {d.reason}",
+                "",
+            ])
 
     md.extend([
         "---",
@@ -85,7 +129,7 @@ def generate_web_report(report: WebScanReport, output_json: Path | None = None) 
                 f"### {f.finding_id} — {f.vulnerability_type}: {f.severity} Severity",
                 f"**URL**: `{f.url}`",
                 f"**Method**: {f.method} · **Parameter**: `{f.parameter}`",
-                f"**Confirmed**: {'✅ Yes' if f.confirmed else '❌ No'}",
+                f"**Confirmed**: {'✅ Yes' if f.confirmed else '❌ No'} (validation state: `{f.validation_state}`)",
                 "",
                 "**AI Analysis**:",
                 f"> {f.ai_analysis}",

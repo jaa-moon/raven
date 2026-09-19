@@ -35,6 +35,8 @@ KNOWLEDGE_DIR = _HERE.parent / "knowledge"
 INDEX_DIR = _HERE / "index"
 FAISS_INDEX_PATH = INDEX_DIR / "faiss.index"
 METADATA_PATH = INDEX_DIR / "metadata.json"
+TOOLS_INDEX_PATH = INDEX_DIR / "tools_index.faiss"
+TOOLS_METADATA_PATH = INDEX_DIR / "tools_metadata.json"
 
 # Chunking parameters
 CHUNK_SIZE = 500      # characters per chunk
@@ -84,6 +86,25 @@ def _load_knowledge_files() -> List[Tuple[str, str]]:
     return docs
 
 
+def _load_tools_files() -> List[Tuple[str, str]]:
+    """
+    Recursively loads all .md files from the knowledge/tools directory.
+    """
+    docs: List[Tuple[str, str]] = []
+    tools_dir = KNOWLEDGE_DIR / "tools"
+    if not tools_dir.exists():
+        return docs
+    for md_file in sorted(tools_dir.rglob("*.md")):
+        try:
+            text = md_file.read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                rel = md_file.relative_to(KNOWLEDGE_DIR).as_posix()
+                docs.append((rel, text))
+        except Exception:
+            continue
+    return docs
+
+
 class KnowledgeIngestor:
     """
     Builds and saves a FAISS vector index from the security knowledge base.
@@ -100,6 +121,10 @@ class KnowledgeIngestor:
     def is_index_built(self) -> bool:
         """Returns True if the FAISS index and metadata files already exist."""
         return FAISS_INDEX_PATH.exists() and METADATA_PATH.exists()
+
+    def is_tools_index_built(self) -> bool:
+        """Returns True if the tools FAISS index and metadata files already exist."""
+        return TOOLS_INDEX_PATH.exists() and TOOLS_METADATA_PATH.exists()
 
     def ingest(self, verbose: bool = False) -> int:
         """
@@ -160,5 +185,46 @@ class KnowledgeIngestor:
 
         if verbose:
             print(f"FAISS index saved to {FAISS_INDEX_PATH} ({len(all_chunks)} vectors).")
+
+        return len(all_chunks)
+
+    def ingest_tools(self, verbose: bool = False) -> int:
+        """
+        Loads all tool knowledge files, chunks and embeds them, and saves a separate tools FAISS index.
+        """
+        import faiss
+
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
+        docs = _load_tools_files()
+        if not docs:
+            if verbose:
+                print(f"No tool knowledge files found in {KNOWLEDGE_DIR / 'tools'}")
+            return 0
+
+        all_chunks: List[str] = []
+        chunk_metadata: List[dict] = []
+
+        for source_path, text in docs:
+            chunks = _chunk_text(text)
+            for chunk in chunks:
+                all_chunks.append(chunk)
+                chunk_metadata.append({
+                    "source": source_path,
+                    "text": chunk,
+                })
+
+        vectors = self._embedder.encode(all_chunks)
+        vectors = vectors.astype(np.float32)
+
+        dim = vectors.shape[1]
+        index = faiss.IndexFlatL2(dim)
+        index.add(vectors)
+
+        faiss.write_index(index, str(TOOLS_INDEX_PATH))
+        TOOLS_METADATA_PATH.write_text(
+            json.dumps(chunk_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         return len(all_chunks)

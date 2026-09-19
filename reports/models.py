@@ -213,3 +213,4 @@ class RavenConfig(BaseModel):
     depth: Literal["quick", "standard", "deep"] = "standard"
     no_docker: bool = False
     agent_mode: Literal["both", "web", "auth"] = "both"
+    use_mcp: bool = False

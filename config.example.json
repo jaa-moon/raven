@@ -1,0 +1,10 @@
+{
+  "provider": "ollama",
+  "model": "qwen2.5:7b",
+  "api_key": "YOUR_API_KEY_HERE_IF_NEEDED",
+  "budget": {
+    "max_requests": 500,
+    "max_time_seconds": 3600
+  },
+  "debug": false
+}

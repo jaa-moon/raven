@@ -1,0 +1,30 @@
+# Environments
+.env
+venv/
+env/
+ENV/
+.venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Raven local data
+.raven/
+.harass/
+raven_assessment_*.md
+raven_assessment_*.json
+mock_project/raven_report_*
+mock_project/reports/
+
+# Tools & coverage
+.pytest_cache/
+htmlcov/
+.coverage

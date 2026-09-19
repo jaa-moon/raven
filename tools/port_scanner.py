@@ -46,3 +46,12 @@ class PortScanner:
             return port, True
         except Exception:
             return port, False
+
+
+# ── Module-level wrapper for MCP gateway dispatch ────────────────────────────
+
+async def scan(host: str = "127.0.0.1", ports: list | None = None) -> list:
+    """Gateway-callable wrapper for PortScanner.scan()."""
+    scanner = PortScanner(host)
+    return await scanner.scan(ports)
+

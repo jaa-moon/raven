@@ -96,3 +96,34 @@ class HttpProber:
             res["param_name"] = param_name
             results.append(res)
         return results
+
+
+# ── Module-level wrappers for MCP gateway dispatch ───────────────────────────
+# These thin functions instantiate HttpProber and delegate to its methods.
+# The gateway calls these by name; the existing class is untouched.
+
+async def probe(
+    base_url: str,
+    endpoint: str,
+    method: str = "GET",
+    params: dict | None = None,
+    data: dict | None = None,
+    headers: dict | None = None,
+    use_form: bool = False,
+) -> dict:
+    """Gateway-callable wrapper for HttpProber.probe()."""
+    prober = HttpProber(base_url)
+    return await prober.probe(endpoint, method, params, data, headers, use_form)
+
+
+async def probe_batch(
+    base_url: str,
+    endpoint: str,
+    payloads: list,
+    param_name: str = "q",
+    method: str = "GET",
+) -> list:
+    """Gateway-callable wrapper for HttpProber.probe_batch()."""
+    prober = HttpProber(base_url)
+    return await prober.probe_batch(endpoint, payloads, param_name, method)
+

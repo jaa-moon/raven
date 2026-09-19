@@ -28,6 +28,13 @@ from urllib.parse import urlparse
 import requests
 
 from web.crawler import CrawlResult
+from web.content_validators import (
+    ValidationState,
+    get_validator_for_path,
+    validate_admin_panel,
+)
+from web.response_classifier import ResponseClass, classify_response
+from web.spa_fallback_detector import SPAFallbackDetector
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +183,23 @@ class CookieAnalysis:
 
 
 @dataclass
+class PathDiscovery:
+    """Result of testing a single candidate path, distinct from a confirmed finding."""
+    path: str
+    status: int
+    content_type: str
+    response_length: int
+    classification: str            # ResponseClass value
+    similarity_to_baseline: Optional[float]
+    validation_state: str          # ValidationState value
+    confidence: str
+    evidence: list[str] = field(default_factory=list)
+    reason: str = ""
+    vulnerability_type: str = ""
+    severity: str = "Info"
+
+
+@dataclass
 class SiteFingerprint:
     """Full fingerprint of the scanned site."""
     detected_technologies: list[str] = field(default_factory=list)
@@ -184,6 +208,7 @@ class SiteFingerprint:
     missing_security_headers: list[str] = field(default_factory=list)
     cookies: list[CookieAnalysis] = field(default_factory=list)
     interesting_paths: list[str] = field(default_factory=list)
+    path_discoveries: list[PathDiscovery] = field(default_factory=list)
     tls_info: dict = field(default_factory=dict)
     information_disclosures: list[str] = field(default_factory=list)
 
@@ -292,11 +317,23 @@ class SiteFingerprinter:
         base_parsed = urlparse(base)
         origin = f"{base_parsed.scheme}://{base_parsed.netloc}"
 
+        detector = SPAFallbackDetector(fetcher=lambda p: self._fetch(origin + p))
+        try:
+            baseline = detector.establish_baseline()
+            logger.info(
+                "SPA-fallback baseline established: status=%s content_type=%s length=%s",
+                baseline.status_code, baseline.content_type, baseline.response_length,
+            )
+        except Exception:
+            logger.warning("Failed to establish SPA-fallback baseline; proceeding without it.", exc_info=True)
+            baseline = None
+
         for path in INTERESTING_PATHS:
-            url = origin + path
-            status = self._probe_path(url)
-            if status in (200, 403):
-                fp.interesting_paths.append(f"{path} [{status}]")
+            status, headers, body = self._fetch(origin + path)
+            discovery = self._evaluate_path(path, status, headers, body, detector if baseline else None)
+            fp.path_discoveries.append(discovery)
+            if discovery.validation_state in (ValidationState.CONFIRMED.value, ValidationState.PROTECTED.value):
+                fp.interesting_paths.append(f"{path} [{status}] ({discovery.validation_state})")
 
         # ── TLS info ───────────────────────────────────────────────────────────
         if base_parsed.scheme == "https":
@@ -310,20 +347,81 @@ class SiteFingerprinter:
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
-    def _probe_path(self, url: str) -> int:
-        """GET *url* and return the status code, or 0 on error."""
+    def _fetch(self, url: str) -> tuple[int, dict, str]:
+        """GET *url* and return (status_code, headers, body_text), or (0, {}, "") on error."""
         try:
             resp = self._session.get(
                 url,
                 timeout=self._timeout,
                 verify=self._verify_ssl,
                 allow_redirects=False,
-                stream=True,
             )
-            resp.close()
-            return resp.status_code
+            return resp.status_code, dict(resp.headers), resp.text
         except Exception:
-            return 0
+            return 0, {}, ""
+
+    def _evaluate_path(
+        self,
+        path: str,
+        status: int,
+        headers: dict,
+        body: str,
+        detector: Optional[SPAFallbackDetector],
+    ) -> "PathDiscovery":
+        """Classify a candidate-path response and run its content-specific validator.
+
+        HTTP 200 is never treated as confirmation on its own: the response is
+        first classified against the SPA-fallback baseline, and only a
+        response that both differs from the baseline AND passes a
+        content-specific check can reach ValidationState.CONFIRMED.
+        """
+        classification = classify_response(path, status, headers, body, detector)
+
+        validator = get_validator_for_path(path)
+        if validator is None:
+            # No content-specific validator for this path — never auto-confirm.
+            if classification.classification == ResponseClass.SPA_FALLBACK:
+                state, confidence, evidence, reason = (
+                    ValidationState.SPA_FALLBACK, "None", [], classification.reason,
+                )
+            elif classification.classification == ResponseClass.PROTECTED:
+                state, confidence, evidence, reason = (
+                    ValidationState.PROTECTED, "Medium",
+                    [f"HTTP {status} — access restricted."], classification.reason,
+                )
+            elif classification.classification == ResponseClass.REAL_RESOURCE:
+                state, confidence, evidence, reason = (
+                    ValidationState.INCONCLUSIVE, "Low",
+                    [], "No content-specific validator exists for this path; discovery only.",
+                )
+            else:
+                state, confidence, evidence, reason = (
+                    ValidationState.FALSE_POSITIVE, "None", [], classification.reason,
+                )
+            return PathDiscovery(
+                path=path, status=status, content_type=classification.content_type,
+                response_length=classification.length,
+                classification=classification.classification.value,
+                similarity_to_baseline=classification.similarity_to_baseline,
+                validation_state=state.value, confidence=confidence,
+                evidence=evidence, reason=reason,
+            )
+
+        if validator is validate_admin_panel:
+            baseline_title = detector.baseline.title if (detector and detector.baseline) else ""
+            outcome = validator(classification, body, baseline_title)
+        else:
+            outcome = validator(classification, body)
+
+        return PathDiscovery(
+            path=path, status=status, content_type=classification.content_type,
+            response_length=classification.length,
+            classification=classification.classification.value,
+            similarity_to_baseline=classification.similarity_to_baseline,
+            validation_state=outcome.state.value, confidence=outcome.confidence,
+            evidence=outcome.evidence, reason=outcome.reason,
+            vulnerability_type=outcome.vulnerability_type, severity=outcome.severity,
+        )
 
     def _parse_cookie(self, raw_header: str) -> Optional[CookieAnalysis]:
         """Parse a Set-Cookie header value into a CookieAnalysis."""

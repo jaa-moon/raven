@@ -161,3 +161,30 @@ class AuthTester:
 
             except Exception as e:
                 return {"cookies_found": 0, "issues": [], "vulnerable": False, "error": str(e)}
+
+
+# ── Module-level wrappers for MCP gateway dispatch ───────────────────────────
+
+async def test_jwt_none_alg(base_url: str, endpoint: str, sample_jwt: str) -> dict:
+    """Gateway-callable wrapper for AuthTester.test_jwt_none_alg()."""
+    tester = AuthTester(base_url)
+    return await tester.test_jwt_none_alg(endpoint, sample_jwt)
+
+
+async def test_jwt_empty_sig(base_url: str, endpoint: str, sample_jwt: str) -> dict:
+    """Gateway-callable wrapper for AuthTester.test_jwt_empty_sig()."""
+    tester = AuthTester(base_url)
+    return await tester.test_jwt_empty_sig(endpoint, sample_jwt)
+
+
+async def test_jwt_role_escalation(base_url: str, endpoint: str, sample_jwt: str) -> dict:
+    """Gateway-callable wrapper for AuthTester.test_jwt_role_escalation()."""
+    tester = AuthTester(base_url)
+    return await tester.test_jwt_role_escalation(endpoint, sample_jwt)
+
+
+async def check_cookie_security(base_url: str, endpoint: str = "/") -> dict:
+    """Gateway-callable wrapper for AuthTester.check_cookie_security()."""
+    tester = AuthTester(base_url)
+    return await tester.check_cookie_security(endpoint)
+

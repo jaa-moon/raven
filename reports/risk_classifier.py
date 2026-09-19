@@ -54,3 +54,15 @@ class RiskClassifier:
             label = "Clean"
 
         return raw_score, label
+
+
+class UniversalRiskClassifier:
+    """
+    Risk classifier for universal v3 PentestReport and Finding models.
+    """
+
+    @staticmethod
+    def calculate_score(findings: List[Any], attack_paths: List[Any]) -> Tuple[float, str]:
+        from engine.risk_engine import RiskEngine
+        score_obj = RiskEngine.calculate_score(findings, attack_paths)
+        return score_obj.score, score_obj.label

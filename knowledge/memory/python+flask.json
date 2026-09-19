@@ -4,8 +4,8 @@
     "technique": "VulnerableDependency",
     "payload_template": "",
     "success_rate": 1.0,
-    "scan_count": 6,
-    "confirmed_count": 6,
+    "scan_count": 9,
+    "confirmed_count": 9,
     "last_seen": "2026-07-28T15:49:41.194409"
   },
   {
@@ -13,8 +13,8 @@
     "technique": "Reflected XSS",
     "payload_template": "<script>alert('RAVEN')</script>",
     "success_rate": 1.0,
-    "scan_count": 1,
-    "confirmed_count": 1,
+    "scan_count": 2,
+    "confirmed_count": 2,
     "last_seen": "2026-08-15T17:08:33.055725"
   },
   {
@@ -22,8 +22,8 @@
     "technique": "Server-Side Template Injection",
     "payload_template": "{{7*7}}",
     "success_rate": 1.0,
-    "scan_count": 1,
-    "confirmed_count": 1,
+    "scan_count": 2,
+    "confirmed_count": 2,
     "last_seen": "2026-08-15T17:08:33.097525"
   },
   {
@@ -31,8 +31,8 @@
     "technique": "OS Command Injection",
     "payload_template": "127.0.0.1 & echo RAVEN_CMD_INJ",
     "success_rate": 1.0,
-    "scan_count": 2,
-    "confirmed_count": 2,
+    "scan_count": 4,
+    "confirmed_count": 4,
     "last_seen": "2026-08-15T17:08:33.137175"
   },
   {
@@ -40,8 +40,8 @@
     "technique": "Server-Side Request Forgery",
     "payload_template": "http://169.254.169.254/latest/meta-data/",
     "success_rate": 1.0,
-    "scan_count": 1,
-    "confirmed_count": 1,
+    "scan_count": 2,
+    "confirmed_count": 2,
     "last_seen": "2026-08-15T17:08:33.156019"
   },
   {
@@ -49,8 +49,35 @@
     "technique": "SQL Injection",
     "payload_template": "' OR '1'='1",
     "success_rate": 1.0,
-    "scan_count": 12,
-    "confirmed_count": 12,
+    "scan_count": 24,
+    "confirmed_count": 24,
     "last_seen": "2026-08-15T17:08:33.186008"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "HardcodedSecret",
+    "payload_template": "",
+    "success_rate": 1.0,
+    "scan_count": 2,
+    "confirmed_count": 2,
+    "last_seen": "2026-08-19T22:59:02.626665"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "MissingSecurityHeaders",
+    "payload_template": "",
+    "success_rate": 1.0,
+    "scan_count": 1,
+    "confirmed_count": 1,
+    "last_seen": "2026-08-19T22:59:02.756478"
+  },
+  {
+    "stack_fingerprint": "python+flask",
+    "technique": "UnexpectedOpenPorts",
+    "payload_template": "Scanned ports: 3306",
+    "success_rate": 1.0,
+    "scan_count": 1,
+    "confirmed_count": 1,
+    "last_seen": "2026-08-19T22:59:02.801557"
   }
 ]

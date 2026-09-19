@@ -7,6 +7,7 @@ Live dual-agent split panel dashboard using Rich Live.
 from __future__ import annotations
 
 import time
+from typing import Any, Optional
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
@@ -18,21 +19,32 @@ from reports.models import AgentFinding, ProjectProfile
 
 class LiveDashboard:
     """
-    Renders real-time progress for Agent 1, Agent 2, and Findings Bus.
+    Renders real-time progress for Agent 1, Agent 2, Findings Bus,
+    and (optionally) live MCP tool call log.
     """
 
-    def __init__(self, console: Console, profile: ProjectProfile, bus: FindingsBus) -> None:
+    def __init__(
+        self,
+        console: Console,
+        profile: ProjectProfile,
+        bus: FindingsBus,
+        gateway: Optional[Any] = None,
+    ) -> None:
         self.console = console
         self.profile = profile
         self.bus = bus
+        self.gateway = gateway
         self.start_time = time.time()
 
     def make_layout(self, agent1_status: str = "Active", agent2_status: str = "Active") -> Layout:
         layout = Layout()
+
+        has_gateway = self.gateway is not None
+
         layout.split(
             Layout(name="header", size=3),
             Layout(name="main", ratio=1),
-            Layout(name="footer", size=8)
+            Layout(name="footer", size=12 if has_gateway else 8)
         )
         layout["main"].split_row(
             Layout(name="agent1"),
@@ -56,9 +68,44 @@ class LiveDashboard:
         a2_table.add_row("Findings:", f"[bold red]{len(self.bus.findings_by_agent('auth_infra'))}[/]")
         layout["agent2"].update(Panel(a2_table, title="[bold blue]AGENT 2 — Auth & Infra[/]", border_style="blue"))
 
-        # Footer Findings Bus
-        findings = self.bus.all_findings()
-        bus_text = "\n".join([f"[{f.severity}] {f.agent.upper()}: {f.vulnerability_type} @ {f.target_url}" for f in findings[-5:]])
-        layout["footer"].update(Panel(bus_text or "[dim]Waiting for findings...[/]", title="[bold red]SHARED FINDINGS BUS[/]", border_style="red"))
+        # Footer — Findings Bus + Tool Call Log
+        if has_gateway:
+            footer_layout = Layout()
+            footer_layout.split(
+                Layout(name="findings_panel", ratio=1),
+                Layout(name="tools_panel", ratio=1),
+            )
+
+            # Findings Bus
+            findings = self.bus.all_findings()
+            bus_text = "\n".join([f"[{f.severity}] {f.agent.upper()}: {f.vulnerability_type} @ {f.target_url}" for f in findings[-4:]])
+            footer_layout["findings_panel"].update(
+                Panel(bus_text or "[dim]Waiting for findings...[/]", title="[bold red]SHARED FINDINGS BUS[/]", border_style="red")
+            )
+
+            # Tool Call Log
+            recent_calls = self.gateway.last_calls(n=4)
+            if recent_calls:
+                tool_lines = []
+                for entry in recent_calls:
+                    status_icon = "[green]✓[/]" if entry.result.success else "[red]✗[/]"
+                    duration = f"{entry.result.duration_ms:.0f}ms"
+                    params_summary = ", ".join(f"{k}={v}" for k, v in list(entry.params.items())[:2])
+                    tool_lines.append(f"{status_icon} [cyan]{entry.tool_name}[/]({params_summary}) [{duration}]")
+                tools_text = "\n".join(tool_lines)
+            else:
+                tools_text = "[dim]No tool calls yet...[/]"
+
+            total = self.gateway.total_calls()
+            footer_layout["tools_panel"].update(
+                Panel(tools_text, title=f"[bold yellow]MCP TOOL CALLS[/] ({total} total)", border_style="yellow")
+            )
+
+            layout["footer"].update(footer_layout)
+        else:
+            # No gateway — just show findings bus
+            findings = self.bus.all_findings()
+            bus_text = "\n".join([f"[{f.severity}] {f.agent.upper()}: {f.vulnerability_type} @ {f.target_url}" for f in findings[-5:]])
+            layout["footer"].update(Panel(bus_text or "[dim]Waiting for findings...[/]", title="[bold red]SHARED FINDINGS BUS[/]", border_style="red"))
 
         return layout

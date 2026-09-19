@@ -120,3 +120,12 @@ class SecretScanner:
 def _get_line_number(content: str, position: int) -> str:
     """Return the line number for a character position in content."""
     return str(content[:position].count("\n") + 1)
+
+
+# ── Module-level wrapper for MCP gateway dispatch ────────────────────────────
+
+def scan_secrets(target_path: str) -> list:
+    """Gateway-callable wrapper for SecretScanner.scan()."""
+    scanner = SecretScanner(target_path)
+    return scanner.scan()
+

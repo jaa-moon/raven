@@ -165,3 +165,12 @@ class DepAuditor:
         except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
             pass
         return results
+
+
+# ── Module-level wrapper for MCP gateway dispatch ────────────────────────────
+
+def audit_deps(dependencies: list) -> list:
+    """Gateway-callable wrapper for DepAuditor.audit()."""
+    auditor = DepAuditor(dependencies)
+    return auditor.audit()
+

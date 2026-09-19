@@ -409,33 +409,41 @@ class ProbeEngine:
                 curl_poc=f"curl -I '{base_url}'",
             )
 
-        # Exposed interesting paths
-        for path_entry in fp.interesting_paths:
-            # Parse "/.git/HEAD [200]" format
-            parts = path_entry.rsplit(" ", 1)
-            path = parts[0]
-            status_str = parts[1].strip("[]") if len(parts) > 1 else "200"
+        # Candidate paths tested during sensitive-path / admin-panel discovery.
+        # Every candidate produces a finding record so the report can show
+        # discovery-vs-validation honestly, but only CONFIRMED candidates are
+        # reported with a real severity and confirmed=True.
+        parsed_base = urlparse(base_url)
+        for disc in fp.path_discoveries:
+            full_url = f"{parsed_base.scheme}://{parsed_base.netloc}{disc.path}"
+            is_confirmed = disc.validation_state == "confirmed"
 
-            # Determine severity based on path
-            if any(p in path for p in [".git", ".env", "wp-config", "config.php", "parameters.yml"]):
-                severity = "Critical"
-                vuln_type = "SensitiveFileExposure"
-                analysis = f"The file {path} is publicly accessible. This can expose source code, credentials, API keys, and database passwords."
-            elif any(p in path for p in ["/admin", "/console", "/actuator/env", "/debug"]):
-                severity = "High"
-                vuln_type = "AdminPanelExposed"
-                analysis = f"Administrative interface at {path} is accessible. This may allow unauthorized configuration changes or code execution."
-            elif any(p in path for p in ["/swagger", "/api-docs", "/graphql"]):
-                severity = "Medium"
-                vuln_type = "APIDocumentationExposed"
-                analysis = f"API documentation at {path} is publicly accessible. This reveals all endpoints, parameters, and data schemas to attackers."
-            else:
+            if is_confirmed:
+                vuln_type = disc.vulnerability_type or "InformationDisclosure"
+                severity = disc.severity or "Low"
+                analysis = (
+                    f"Content-specific validation confirmed exposure at {disc.path}: {disc.reason}"
+                )
+            elif disc.validation_state == "protected":
+                vuln_type = "ProtectedResource"
+                severity = "Info"
+                analysis = f"{disc.path} exists but access is restricted (HTTP {disc.status}). {disc.reason}"
+            elif disc.validation_state == "spa_fallback":
+                vuln_type = "PathDiscovery"
+                severity = "Info"
+                analysis = f"{disc.path} returned the SPA fallback shell, not a distinct resource. {disc.reason}"
+            elif disc.validation_state == "validated":
+                vuln_type = disc.vulnerability_type or "PathDiscovery"
                 severity = "Low"
-                vuln_type = "InformationDisclosure"
-                analysis = f"Interesting path {path} is accessible (HTTP {status_str})."
-
-            parsed = urlparse(base_url)
-            full_url = f"{parsed.scheme}://{parsed.netloc}{path}"
+                analysis = f"{disc.path} shows partial evidence but was not fully confirmed: {disc.reason}"
+            elif disc.validation_state == "inconclusive":
+                vuln_type = "PathDiscovery"
+                severity = "Info"
+                analysis = f"{disc.path} could not be conclusively validated: {disc.reason}"
+            else:  # false_positive / candidate
+                vuln_type = "PathDiscovery"
+                severity = "Info"
+                analysis = f"{disc.path}: {disc.reason}"
 
             self._add_finding(
                 v_type=vuln_type,
@@ -444,12 +452,20 @@ class ProbeEngine:
                 method="GET",
                 parameter="Path",
                 payload="",
-                evidence=f"{path} returned HTTP {status_str}",
-                status=int(status_str) if status_str.isdigit() else 200,
+                evidence="; ".join(disc.evidence) if disc.evidence else f"{disc.path} returned HTTP {disc.status}",
+                status=disc.status,
                 ai_analysis=analysis,
-                remediation=f"Block access to {path} via web server configuration or .htaccess rules. "
-                            f"For .git/.env files, add deny rules in nginx/Apache config.",
+                remediation=(
+                    f"Block access to {disc.path} via web server configuration or .htaccess rules. "
+                    f"For .git/.env/config files, add deny rules in nginx/Apache config."
+                    if is_confirmed else
+                    "No action required unless later evidence confirms exposure."
+                ),
                 curl_poc=f"curl '{full_url}'",
+                validation_state=disc.validation_state,
+                classification=disc.classification,
+                confirmed=is_confirmed,
+                rejection_reason="" if is_confirmed else disc.reason,
             )
 
         # Insecure cookies
@@ -516,8 +532,17 @@ class ProbeEngine:
 
     def _add_finding(self, *, v_type: str, severity: str, url: str, method: str,
                      parameter: str, payload: str, evidence: str, status: int,
-                     ai_analysis: str, remediation: str, curl_poc: str) -> None:
-        """Add a finding with deduplication."""
+                     ai_analysis: str, remediation: str, curl_poc: str,
+                     validation_state: str = "confirmed", classification: str = "",
+                     confirmed: bool = True, rejection_reason: str = "") -> None:
+        """Add a finding with deduplication.
+
+        ``confirmed``/``validation_state`` default to the historical
+        always-confirmed behavior for callers that have already done their
+        own evidence-based validation (payload injection findings). Callers
+        working from unvalidated path-discovery data must pass explicit
+        values — see the path-discovery loop above.
+        """
         dedup_key = f"{v_type}|{url}|{parameter}"
         if dedup_key in self._seen_findings:
             return
@@ -534,10 +559,13 @@ class ProbeEngine:
             payload_sent=payload,
             evidence=evidence,
             http_status=status,
-            confirmed=True,
+            confirmed=confirmed,
             ai_analysis=ai_analysis,
             remediation=remediation,
             curl_poc=curl_poc,
+            validation_state=validation_state,
+            classification=classification,
+            rejection_reason=rejection_reason,
         )
         with self._findings_lock:
             self._findings.append(finding)
