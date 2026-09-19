@@ -1,130 +1,271 @@
 """
 core/models.py
 --------------
-Pydantic models for Raven Phase 8 web scanning module.
+Shared contracts for the Raven assessment runtime.
 
-These models are used by the web/ package (crawler, fingerprinter,
-probe_engine, ai_probe_advisor, web_report_generator).
+Every component (planner, agents, gateway, validator, reporter) exchanges
+these models; nothing passes raw tool output or ad-hoc dicts across a
+component boundary.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 
-# ── Vulnerability type enum (string-based for flexibility) ────────────────────
+def new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
-WebVulnType = Literal[
-    "SQLi",
-    "XSS",
-    "SSRF",
-    "LFI",
-    "OpenRedirect",
-    "HeaderInjection",
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+# ── Enums ─────────────────────────────────────────────────────────────────────
+
+class Severity(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+SEVERITY_RANK: Dict[str, int] = {
+    "critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0,
+}
+
+
+class FindingStatus(str, Enum):
+    CANDIDATE = "candidate"
+    CONFIRMED = "confirmed"
+    INCONCLUSIVE = "inconclusive"
+    REJECTED = "rejected"
+
+
+class Confidence(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    NONE = "none"
+
+
+class CoverageStatus(str, Enum):
+    ASSESSED = "ASSESSED"
+    PARTIALLY_ASSESSED = "PARTIALLY_ASSESSED"
+    NOT_ASSESSED = "NOT_ASSESSED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    BLOCKED = "BLOCKED"
+
+
+# ── Evidence / observations / findings ────────────────────────────────────────
+
+class Evidence(BaseModel):
+    """A concrete, redacted artifact supporting or refuting a finding."""
+
+    evidence_id: str = Field(default_factory=lambda: new_id("EVD"))
+    kind: str = "tool_output"  # http_response | baseline_comparison | file_content | tool_output ...
+    summary: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
+    source_tool: str = ""
+    created_at: str = Field(default_factory=now_iso)
+
+
+class Observation(BaseModel):
+    """A normalized fact learned from a tool result. Not yet a finding."""
+
+    observation_id: str = Field(default_factory=lambda: new_id("OBS"))
+    kind: str = ""  # e.g. http.fingerprint, port.open, file.secret_match
+    surface: str = ""
+    summary: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
+    source_task: str = ""
+    created_at: str = Field(default_factory=now_iso)
+
+
+class Finding(BaseModel):
+    """
+    A security finding. Agents only ever create CANDIDATE findings; only the
+    validator may move a finding to CONFIRMED / INCONCLUSIVE / REJECTED.
+    """
+
+    finding_id: str = Field(default_factory=lambda: new_id("FND"))
+    title: str = ""
+    category: str = ""
+    severity: Severity = Severity.INFO
+    status: FindingStatus = FindingStatus.CANDIDATE
+    confidence: Confidence = Confidence.NONE
+
+    surface: str = ""
+    location: str = ""
+    description: str = ""
+    impact: str = ""
+    remediation: str = ""
+    reproduction: List[str] = Field(default_factory=list)
+
+    # Machine-readable description of what the agent saw; validators dispatch
+    # on signal["validator"] and re-derive the truth from a fresh observation.
+    signal: Dict[str, Any] = Field(default_factory=dict)
+
+    evidence: List[Evidence] = Field(default_factory=list)
+    validation_notes: List[str] = Field(default_factory=list)
+    validator: str = ""
+    source_task: str = ""
+    created_at: str = Field(default_factory=now_iso)
+    validated_at: Optional[str] = None
+
+    @property
+    def is_reportable(self) -> bool:
+        return self.status == FindingStatus.CONFIRMED and bool(self.evidence)
+
+
+# ── Tool contracts ────────────────────────────────────────────────────────────
+
+class ToolRequest(BaseModel):
+    """An agent's request for a capability, executed via the MCP gateway."""
+
+    request_id: str = Field(default_factory=lambda: new_id("REQ"))
+    capability: str = ""
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    tool: Optional[str] = None            # explicit tool override (rare)
+    exclude_tools: List[str] = Field(default_factory=list)
+    purpose: str = ""
+    agent: str = ""
+    task_id: str = ""
+
+
+ToolStatus = Literal[
+    "ok", "error", "timeout", "out_of_scope", "invalid_args",
+    "tool_unavailable", "budget_exhausted", "target_unreachable",
+    "rate_limited", "auth_failure",
 ]
 
 
-# ── Individual web finding ────────────────────────────────────────────────────
+class ToolResult(BaseModel):
+    """Normalized result of a gateway execution."""
 
-class WebFinding(BaseModel):
-    """A single confirmed or suspected web vulnerability."""
+    request_id: str = ""
+    tool: str = ""
+    capability: str = ""
+    status: ToolStatus = "ok"
+    data: Dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+    duration_ms: float = 0.0
 
-    finding_id: str = ""
-    vulnerability_type: str = ""
-    severity: str = "Info"  # Critical | High | Medium | Low | Info
-    url: str = ""
-    method: str = "GET"
-    parameter: str = ""
-    payload_sent: str = ""
-    evidence: str = ""
-    http_status: int = 0
-    confirmed: bool = False
-    ai_analysis: str = ""
-    remediation: str = ""
-    curl_poc: str = ""
-
-    # Evidence-based confidence state. One of: candidate, validated, confirmed,
-    # inconclusive, protected, spa_fallback, false_positive. HTTP 200 alone
-    # must never set this to "confirmed" — see web.content_validators.
-    validation_state: str = "candidate"
-    classification: str = ""  # response_classifier.ResponseClass value
-    rejection_reason: str = ""
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
 
 
-# ── Path discovery (candidate-path scanning) ──────────────────────────────────
-
-class PathDiscoveryEntry(BaseModel):
-    """One candidate path tested during sensitive-path / admin-panel discovery.
-
-    This is distinct from WebFinding: every candidate path tested produces
-    exactly one PathDiscoveryEntry, regardless of whether it turned into a
-    confirmed vulnerability, so the report can show discovery-vs-validation
-    honestly (see 'Path Discovery Summary').
-    """
-
-    path: str = ""
-    http_status: int = 0
-    content_type: str = ""
-    response_length: int = 0
-    classification: str = ""          # response_classifier.ResponseClass value
-    similarity_to_baseline: Optional[float] = None
-    validation_state: str = "candidate"
-    confidence: str = "None"
-    evidence: List[str] = Field(default_factory=list)
-    reason: str = ""
+class ToolCallRecord(BaseModel):
+    request_id: str
+    tool: str = ""
+    capability: str = ""
+    agent: str = ""
+    task_id: str = ""
+    status: str = "ok"
+    duration_ms: float = 0.0
+    error: str = ""
+    purpose: str = ""
+    timestamp: str = Field(default_factory=now_iso)
 
 
-# ── Aggregated web scan report ────────────────────────────────────────────────
-
-class WebScanReport(BaseModel):
-    """Complete output of a web vulnerability scan."""
-
-    target: str = ""
-    scan_type: str = "Active Web Scan"
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
-    scan_duration_seconds: float = 0.0
-    fingerprint: Dict = Field(default_factory=dict)
-    findings: List[WebFinding] = Field(default_factory=list)
-    findings_by_severity: Dict[str, int] = Field(default_factory=dict)
-    total_findings: int = 0
-    report_path: str = ""
-    path_discoveries: List[PathDiscoveryEntry] = Field(default_factory=list)
-    path_discovery_summary: Dict[str, int] = Field(default_factory=dict)
+class RecoveryRecord(BaseModel):
+    request_id: str = ""
+    capability: str = ""
+    tool: str = ""
+    failure_type: str = ""
+    action: str = ""
+    detail: str = ""
+    timestamp: str = Field(default_factory=now_iso)
 
 
-# ── AST Context Compression Models (Phase 9) ───────────────────────────────
+# ── Planning ──────────────────────────────────────────────────────────────────
 
-class CompressedChunk(BaseModel):
-    """A single extracted code unit from AST or structural parsing."""
-
-    chunk_id: str
-    chunk_type: Literal[
-        "function", "method", "class_def",
-        "import_block", "global_assignment", "decorator_block"
-    ]
-    name: str
-    line_start: int
-    line_end: int
-    source: str
-    risk_score: float = 0.0
-    risk_reasons: List[str] = Field(default_factory=list)
-    language: str = "python"
-    file_path: str = ""
+TaskStatus = Literal["pending", "running", "done", "failed", "skipped", "blocked"]
 
 
-class CompressionResult(BaseModel):
-    """Aggregate output of AST compression on a single file."""
+class TestTask(BaseModel):
+    """One unit of assessment work: an agent applying a capability to a surface."""
 
-    file_path: str
-    language: str
-    original_line_count: int = 0
-    original_char_count: int = 0
-    compressed_char_count: int = 0
-    compression_ratio: float = 1.0
-    chunks: List[CompressedChunk] = Field(default_factory=list)
-    fallback_used: bool = False
-    fallback_reason: str = ""
+    __test__ = False  # not a pytest class
 
+    task_id: str = Field(default_factory=lambda: new_id("TSK"))
+    key: str = ""                # stable dedupe key, e.g. "web.headers::http://x"
+    agent: str = ""
+    capability: str = ""
+    surface: str = ""
+    title: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    rationale: str = ""
+    priority: int = 50           # 0-100, higher = sooner
+    cost: int = 1                # rough tool-call cost, used for budget-aware selection
+    status: TaskStatus = "pending"
+    result_summary: str = ""
+    attempts: int = 0
+
+
+class TestPlan(BaseModel):
+    __test__ = False
+
+    plan_id: str = Field(default_factory=lambda: new_id("PLN"))
+    version: int = 1
+    generated_by: Literal["deterministic", "llm"] = "deterministic"
+    rationale: str = ""
+    task_ids: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=now_iso)
+
+
+class CoverageItem(BaseModel):
+    surface: str
+    status: CoverageStatus = CoverageStatus.NOT_ASSESSED
+    detail: str = ""
+    task_ids: List[str] = Field(default_factory=list)
+
+
+# ── Knowledge / context ───────────────────────────────────────────────────────
+
+class RAGSnippet(BaseModel):
+    source: str = ""
+    title: str = ""
+    kind: Literal["checklist", "case", "lesson", "knowledge"] = "knowledge"
+    text: str = ""
+    score: float = 0.0
+
+
+class RAGContext(BaseModel):
+    """Result of one contextual retrieval; only a reference is kept in state."""
+
+    query: str = ""
+    purpose: str = ""
+    snippets: List[RAGSnippet] = Field(default_factory=list)
+    created_at: str = Field(default_factory=now_iso)
+
+
+class AgentActivity(BaseModel):
+    agent: str
+    task_id: str
+    title: str = ""
+    started_at: str = Field(default_factory=now_iso)
+    finished_at: Optional[str] = None
+    outcome: str = "running"
+
+
+class Lesson(BaseModel):
+    """Validated, reusable knowledge extracted from an assessment."""
+
+    lesson_id: str = Field(default_factory=lambda: new_id("LSN"))
+    kind: Literal["lesson", "case"] = "lesson"
+    context: str = ""        # e.g. "SPA"
+    observation: str = ""
+    lesson: str = ""
+    recommended_validation: str = ""
+    tags: List[str] = Field(default_factory=list)
+    confidence: Confidence = Confidence.MEDIUM
+    source_assessment: str = ""
+    created_at: str = Field(default_factory=now_iso)

@@ -1,12 +1,5 @@
-"""
-raven.py
---------
-Single main entry point for Raven CLI tool.
-"""
+"""Single entry point: python raven.py [command]."""
 
-from __future__ import annotations
-
-import sys
 from cli.app import app
 
 if __name__ == "__main__":

@@ -1,68 +1,87 @@
-# Raven: Autonomous Pentesting Agent
+# Raven — Autonomous Security Assessment Platform
 
-Raven is an autonomous AI penetration-testing framework capable of executing complex security assessments. 
-Instead of relying on rigid, pre-defined rules, Raven dynamically inspects its targets and orchestrates a team of specialized AI agents using a Model Context Protocol (MCP) gateway to uncover vulnerabilities.
+Raven assesses an **authorized** target (URL, host/IP, or local source tree). It works out what the
+target is, plans capability-based tests, executes them through a scoped and budgeted tool gateway,
+**independently validates** every candidate finding, and reports honest coverage. It never treats
+"no findings" as "secure".
 
-**Version:** 3.0.0 (Adaptive Agentic Architecture)
+```
+observe → understand → plan → act → observe → update context → re-plan
+```
 
-> ⚠️ **Disclaimer:** Raven is designed strictly for authorized security testing. You must have explicit permission to probe the targets you assess. Raven can execute active payloads and generate significant traffic. See [SECURITY.md](SECURITY.md) for full terms.
-
----
-
-## 🎯 Key Features
-
-- **Universal Target Resolution**: Assess web applications, REST/GraphQL APIs, raw network services (`host:port`), local executables, and source code repositories.
-- **7 Specialized Agents**: Includes deep-inspection agents for Web/API, Network, Binary, Configuration, Auth/Identity, Source Code, and Finding Validation.
-- **20 MCP Security Tools**: Features a sandboxed gateway exposing capabilities like protocol probing, CLI fuzzing, banner grabbing, directory fuzzing, SQLi testing, and more.
-- **Honest Coverage Reporting**: Raven transparently tracks what it *actually* tested. If boundaries are blocked by rate limits or WAFs, Raven explicitly declares them as untested instead of falsely claiming "no vulnerabilities found."
-- **Strict Finding Validation**: Vulnerabilities are never blindly accepted. Raven synthesizes reproducible `curl_poc` or `cli_poc` commands and attempts to execute them dynamically to confirm impact.
-- **Atomic State Persistence**: Resilient to crashes and pauses. The framework maintains a persistent `AssessmentState`, tracking active agent plans and rejected hypotheses.
-
-## ⚙️ Architecture
-
-Raven operates in a 12-step deterministic pipeline:
-1. **Target Resolution**: Auto-classifies the target type.
-2. **Scope Validation**: Checks authorization and boundary limits.
-3. **Reconnaissance**: Initial mapping, banner grabbing, process inspection.
-4. **Asset Graph Synthesis**: Builds an internal map of attack surfaces.
-5. **Capability Discovery**: Selects safe tools based on the defined scope.
-6. **RAG Knowledge Retrieval**: Injects target-specific exploit knowledge.
-7. **Adaptive Planning**: Deterministically routes execution to specialized agents.
-8. **Parallel Execution**: Agents execute attacks via the MCP gateway.
-9. **Validation**: Findings are verified with active reproducible PoCs.
-10. **Risk Correlation**: Cross-references findings to build attack chains.
-11. **Reporting**: Generates the final Markdown assessment.
-
-## 🚀 Installation
-
-Ensure you have Python 3.10+ installed.
+## Quick start
 
 ```bash
-git clone https://github.com/your-org/raven.git
-cd raven
-python -m venv venv
-# Windows: venv\Scripts\activate
-# Unix/macOS: source venv/bin/activate
+python -m venv venv && venv/Scripts/activate      # or: source venv/bin/activate
 pip install -r requirements.txt
+
+python raven.py                                   # simple menu: Test / Setup / Help / Version / Exit
+python raven.py assess http://localhost:3000 --depth quick
+python raven.py assess ./my-project --fail-on high --yes    # --yes = "I am authorized" (CI)
+python raven.py setup                             # optional: configure a local or API LLM
 ```
 
-## 🛠️ Usage
+An LLM is **optional**. Without one Raven runs fully rule-based; with one it helps interpret the target
+and prioritize tasks (it can never override scope, budget, tool schemas or validation).
 
-Raven operates primarily through its CLI interface.
+Reports are written to `raven_reports/raven_<id>.md` and `.json`; state to `~/.raven/assessments/<id>/`
+(`RAVEN_HOME` overrides).
 
-### Running an Assessment
+## Architecture
+
+| Layer | Package | Responsibility |
+|---|---|---|
+| Intake | `core/target.py` | Parse/normalize input; never tests anything |
+| Analysis | `intelligence/target_analyzer.py` | "What am I looking at?" → `TargetProfile` |
+| Knowledge (RAG) | `intelligence/rag.py`, `context.py`, `lessons.py`, `knowledge/` | Checklists, cases, validated lessons; retrieved by *current context* |
+| Planner | `intelligence/planner.py` | Chooses next work from profile + tools + budget + history; re-plans every iteration |
+| Agents | `agents/` | Propose tasks, request **capabilities** (never tools) |
+| MCP gateway | `raven_mcp/` | Capability→tool resolution, arg validation, **scope**, **budget**, timeout, normalization, logging |
+| Tools | `tools/` | Concrete scanners registered with capability metadata in `tools/catalog.py` |
+| Validation | `validation/` | Re-observes the target; SPA/response baselines; content signatures; redaction |
+| Recovery | `recovery/` | Classifies failures → retry / backoff / alternative tool / correct args / skip / block (all recorded) |
+| State | `core/state.py` | The single source of truth; atomic persistence |
+| Coverage | `core/coverage.py` | Computed from what actually ran |
+| Report | `reporting/` | One honest report pipeline |
+| Runtime | `core/assessment.py`, `core/runtime.py` | The adaptive loop (small, testable stages) |
+
+Separation of duties: RAG = knowledge · LLM = reasoning · Planner = decisions · Agents = specialized
+behavior · Gateway = controlled tool access · Scope/Budget = boundaries · Validator = evidence ·
+State = truth · Report = output.
+
+### Findings pipeline
+
+`tool output → observation → candidate finding → validation → evidence → CONFIRMED | INCONCLUSIVE | REJECTED`.
+Agents can only create candidates. HTTP 200 never confirms anything: candidate paths are compared with a
+nonexistent-route baseline (SPA catch-all detection) and must carry a content signature.
+
+### Adding a capability
+
+1. Add a tool: `ToolDefinition(name=…, capabilities=[…], input_schema=…, risk_level=…, scope_args=…, handler=…)`
+   in `tools/catalog.py`.
+2. Add an agent (`agents/base.py::Agent`): `applies()`, `propose_tasks()`, `run()`; register it in
+   `agents/registry.py`.
+3. Add a validator (`_v_<signal>` in `validation/`) for any finding type it emits.
+
+No core changes are required.
+
+## Tests
+
 ```bash
-python -m cli.app assess <target> --depth [quick|standard|deep]
+pip install -r requirements-dev.txt
+python -m pytest            # unit + integration (real local servers) + regression
 ```
-*`<target>` can be a URL, IP, `host:port`, local path, or binary.*
 
-### Configuration
-Raven stores its configuration at `~/.raven/config.json`.
-See `config.example.json` for the expected schema. 
-Raven defaults to using a local `ollama` provider with `qwen2.5:7b` for completely offline execution, but easily scales to Anthropic, OpenAI, or Gemini.
+## Current limitations (honest list)
 
-## 🤝 Contributing
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests.
+- **Not implemented:** authorization/access-control testing, authenticated testing, active injection
+  testing (SQLi/XSS/SSRF…). These appear in every web report as `NOT_ASSESSED`.
+- **Target types:** URL/web, host/network service, and source directory are supported. Binaries, containers,
+  cloud and Kubernetes targets are classified but have no agents yet (coverage reports them as not assessed).
+- Knowledge retrieval is lexical (BM25), not embedding-based.
+- File-permission auditing is POSIX-only (reported as `BLOCKED` on Windows).
+- Static-analysis hits are pattern-based; unsafe constructs stay `INCONCLUSIVE` until data flow is shown.
 
-## 📜 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## Security
+
+See `SECURITY.md`. Only assess systems you own or are explicitly authorized to test.

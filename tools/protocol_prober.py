@@ -22,33 +22,41 @@ class ProtocolProber:
         self.timeout = timeout
 
     async def probe(self, protocol: str = "auto") -> Dict[str, Any]:
-        """Probe the port using automatic detection or specific protocol."""
+        """Probe the port with a named protocol, or auto-detect by behavior.
+
+        Auto mode tries every known protocol, well-known-port matches first with the
+        full timeout, then the rest with a short timeout, so a service on a
+        non-standard port (Redis on 7777) is still identified.
+        """
         proto = protocol.lower().strip()
+        probes = [
+            ("redis", self._probe_redis, (6379, 6380)),
+            ("memcached", self._probe_memcached, (11211,)),
+            ("mysql", self._probe_mysql, (3306, 3307)),
+            ("ftp", self._probe_ftp, (21, 2121)),
+            ("smtp", self._probe_smtp, (25, 587, 465)),
+        ]
+        if proto != "auto":
+            probes = [p for p in probes if p[0] == proto]
+            hinted = probes
+            others: list = []
+        else:
+            hinted = [p for p in probes if self.port in p[2]]
+            others = [p for p in probes if self.port not in p[2]]
 
-        if proto in ("redis", "auto") and (proto == "redis" or self.port in (6379, 6380)):
-            res = await self._probe_redis()
+        for _, fn, _ports in hinted:
+            res = await fn()
             if res.get("detected"):
                 return res
-
-        if proto in ("mysql", "auto") and (proto == "mysql" or self.port in (3306, 3307)):
-            res = await self._probe_mysql()
-            if res.get("detected"):
-                return res
-
-        if proto in ("ftp", "auto") and (proto == "ftp" or self.port in (21, 2121)):
-            res = await self._probe_ftp()
-            if res.get("detected"):
-                return res
-
-        if proto in ("smtp", "auto") and (proto == "smtp" or self.port in (25, 587, 465)):
-            res = await self._probe_smtp()
-            if res.get("detected"):
-                return res
-
-        if proto in ("memcached", "auto") and (proto == "memcached" or self.port in (11211,)):
-            res = await self._probe_memcached()
-            if res.get("detected"):
-                return res
+        full_timeout = self.timeout
+        self.timeout = min(full_timeout, 1.0)
+        try:
+            for _, fn, _ports in others:
+                res = await fn()
+                if res.get("detected"):
+                    return res
+        finally:
+            self.timeout = full_timeout
 
         # Generic banner / HTTP probe fallback
         return await self._probe_generic()

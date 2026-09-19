@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.1.0 - Adaptive engine rebuild
+
+Complete rework around a target-agnostic, adaptive architecture (see README).
+
+### Added
+- Target intake/analysis producing a `TargetProfile`; scope derived from the target.
+- Capability-based tool registry + MCP gateway (arg validation, scope, budget, timeout, normalization).
+- Adaptive planner (re-plans every iteration; budget-aware; bounded optional LLM prioritization).
+- Independent validator with SPA/route baselines, content signatures and secret redaction.
+- Recovery controller with recorded decisions; honest coverage (`ASSESSED/PARTIALLY_ASSESSED/NOT_ASSESSED/NOT_APPLICABLE/BLOCKED`).
+- Contextual knowledge (checklists, cases, validated lessons) and a learning pipeline gated on validated evidence.
+- Simple menu CLI (Test / Setup / Help / Version / Exit); `--yes` for non-interactive authorization.
+
+### Removed
+- Legacy engine, engine models, capability manifests, adapters, orchestrator, sandbox, old reports/RAG (FAISS),
+  readers, MCP subprocess servers, parallel web-scanner pipeline, unused tools (fuzzers, credential tester,
+  process prober, external runners), PR-comment/badge CI helpers, and their tests.
+
+### Fixed (defects in the previous engine, removed with it)
+- Specialized agents were never executed (planner/agent identifier mismatch); tool calls used wrong parameter
+  names/result shapes; every agent self-confirmed its findings; empty scans were scored "Clean";
+  coverage marked unexecuted tests as tested; scope allowed every domain by default.
+
+
 All notable changes to Raven will be documented in this file.
 
 ## [3.0.0] - 2026-09-16

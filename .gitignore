@@ -28,3 +28,5 @@ mock_project/reports/
 .pytest_cache/
 htmlcov/
 .coverage
+
+raven_reports/

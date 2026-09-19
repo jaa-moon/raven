@@ -1,234 +1,153 @@
 """
 raven_mcp/gateway.py
 --------------------
-Dual-purpose MCP gateway for Raven:
+The controlled tool-access layer. Agents never call tools directly:
 
-A) MCPGateway (existing) — routes tool calls to external MCP server
-   subprocesses via ClientSession for external MCP client usage.
-
-B) InternalGateway (NEW) — in-process tool dispatch for agent-to-tool
-   routing. Resolves tools from ToolRegistry, calls them directly,
-   logs every call for dashboard display.
+    Agent -> Gateway -> (resolve tool) -> validate args -> ScopeValidator
+          -> Budget -> execute (timeout) -> normalize -> log -> ToolResult
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import json
-import threading
+import logging
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from raven_mcp.tool_schema import ALL_TOOLS, ToolSchema
+from core.budget import BudgetManager
+from core.models import ToolCallRecord, ToolRequest, ToolResult
+from core.scope import ScopeValidator
+from raven_mcp.models import ToolDefinition, ToolError, validate_arguments
+from raven_mcp.registry import ToolRegistry
 
+logger = logging.getLogger("raven.gateway")
 
-# ── Shared result model ──────────────────────────────────────────────────────
-
-@dataclass
-class ToolResult:
-    """Result of a single tool invocation."""
-    tool_name: str = ""
-    success: bool = True
-    data: Any = None
-    error: str = ""
-    duration_ms: float = 0.0
+CallLogger = Callable[[ToolCallRecord], None]
 
 
-@dataclass
-class ToolCallLog:
-    """Log entry for a single gateway call (for dashboard display)."""
-    tool_name: str
-    params: Dict[str, Any]
-    result: ToolResult
-    timestamp: str = ""
-
-
-# ── InternalGateway (NEW) ────────────────────────────────────────────────────
-
-class InternalGateway:
-    """
-    In-process tool dispatch gateway.
-
-    Agents call gateway.call(tool_name, **params) and the gateway:
-    1. Resolves the tool from ToolRegistry
-    2. Calls the function directly (sync or async)
-    3. Wraps the result in ToolResult
-    4. Logs the call for dashboard display
-    """
-
-    def __init__(self, registry) -> None:
-        """
-        Args:
-            registry: A ToolRegistry instance with pre-imported tool modules.
-        """
-        self.registry = registry
-        self._call_log: List[ToolCallLog] = []
-        self._lock = threading.Lock()
-
-    async def call(
+class Gateway:
+    def __init__(
         self,
-        tool_name: str,
-        timeout_seconds: int = 30,
-        **params
-    ) -> ToolResult:
-        """
-        Invoke a registered tool by name with keyword params.
+        registry: ToolRegistry,
+        scope: ScopeValidator,
+        budget: BudgetManager,
+        target_type: Optional[str] = None,
+        on_call: Optional[CallLogger] = None,
+    ) -> None:
+        self.registry = registry
+        self.scope = scope
+        self.budget = budget
+        self.target_type = target_type
+        self._on_call = on_call
+        self.calls: List[ToolCallRecord] = []
 
-        Handles both sync and async tool functions, applies a timeout,
-        and catches all exceptions into ToolResult.
-        """
-        start = time.time()
+    # -- discovery / selection support ---------------------------------------------
+
+    def discover(self, capability: Optional[str] = None) -> List[Dict[str, Any]]:
+        if capability:
+            return [t.summary() for t in self.registry.providers(capability, self.target_type)]
+        return self.registry.describe()
+
+    def can_provide(self, capability: str) -> bool:
+        return bool(self.registry.providers(capability, self.target_type))
+
+    def alternatives(self, capability: str, exclude: List[str]) -> List[str]:
+        return [t.name for t in self.registry.providers(capability, self.target_type, exclude)]
+
+    # -- execution ------------------------------------------------------------------
+
+    async def execute(self, req: ToolRequest) -> ToolResult:
+        started = time.monotonic()
+        tool, err = self._resolve(req)
+        if tool is None:
+            return self._finish(req, None, ToolResult(
+                request_id=req.request_id, capability=req.capability,
+                status="tool_unavailable", error=err), started)
+
+        args, problems = validate_arguments(tool, req.arguments)
+        if problems:
+            return self._finish(req, tool, ToolResult(
+                request_id=req.request_id, tool=tool.name, capability=req.capability,
+                status="invalid_args", error="; ".join(problems)), started)
+
+        decision = self.scope.check(self._scope_targets(tool, args), tool.risk_level)
+        if not decision.allowed:
+            return self._finish(req, tool, ToolResult(
+                request_id=req.request_id, tool=tool.name, capability=req.capability,
+                status="out_of_scope", error=decision.reason), started)
+
+        if not self.budget.can_afford(expensive=tool.expensive):
+            return self._finish(req, tool, ToolResult(
+                request_id=req.request_id, tool=tool.name, capability=req.capability,
+                status="budget_exhausted",
+                error=f"Budget exhausted ({', '.join(self.budget.exhausted_dimensions()) or 'limit reached'})."),
+                started)
+
+        self.budget.consume(tool_calls=1, expensive=1 if tool.expensive else 0)
+        result = await self._run(tool, req, args)
+        return self._finish(req, tool, result, started)
+
+    # -- internals ------------------------------------------------------------------
+
+    def _resolve(self, req: ToolRequest) -> Tuple[Optional[ToolDefinition], str]:
+        if req.tool:
+            tool = self.registry.get(req.tool)
+            if tool is None:
+                return None, f"Unknown tool '{req.tool}'."
+            missing = tool.missing_requirements()
+            return (None, f"Tool '{tool.name}' unavailable; missing {', '.join(missing)}.") if missing else (tool, "")
+        providers = self.registry.providers(req.capability, self.target_type, req.exclude_tools)
+        if providers:
+            return providers[0], ""
+        return None, self.registry.missing_capability_reason(req.capability)
+
+    @staticmethod
+    def _scope_targets(tool: ToolDefinition, args: Dict[str, Any]) -> List[Tuple[str, str]]:
+        targets = []
+        for arg, kind in tool.scope_args.items():
+            if arg in args and args[arg] not in (None, ""):
+                targets.append((kind, str(args[arg])))
+        return targets
+
+    async def _run(self, tool: ToolDefinition, req: ToolRequest, args: Dict[str, Any]) -> ToolResult:
+        handler = tool.handler
+        base = dict(request_id=req.request_id, tool=tool.name, capability=req.capability)
         try:
-            registered = self.registry.get(tool_name)
-        except Exception as e:
-            result = ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=str(e),
-                duration_ms=0.0,
-            )
-            self._log_call(tool_name, params, result)
-            return result
-
-        fn = registered.get_callable()
-
-        try:
-            if inspect.iscoroutinefunction(fn):
-                # Async tool function — await directly with timeout
-                raw = await asyncio.wait_for(
-                    fn(**params),
-                    timeout=timeout_seconds,
-                )
+            if inspect.iscoroutinefunction(handler):
+                raw = await asyncio.wait_for(handler(**args), timeout=tool.timeout_seconds)
             else:
-                # Sync tool function — run in executor with timeout
                 loop = asyncio.get_running_loop()
                 raw = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: fn(**params)),
-                    timeout=timeout_seconds,
-                )
-
-            # Normalize result to dict
-            if hasattr(raw, "dict"):
-                output = raw.dict()
-            elif hasattr(raw, "model_dump"):
-                output = raw.model_dump()
-            elif isinstance(raw, dict):
-                output = raw
-            elif isinstance(raw, (list, tuple)):
-                output = {"items": raw}
-            else:
-                output = {"result": raw}
-
-            result = ToolResult(
-                tool_name=tool_name,
-                success=True,
-                data=output,
-                duration_ms=(time.time() - start) * 1000,
-            )
-
+                    loop.run_in_executor(None, lambda: handler(**args)), timeout=tool.timeout_seconds)
         except asyncio.TimeoutError:
-            result = ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"Timeout after {timeout_seconds}s",
-                duration_ms=(time.time() - start) * 1000,
-            )
-        except Exception as e:
-            result = ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=str(e),
-                duration_ms=(time.time() - start) * 1000,
-            )
+            return ToolResult(**base, status="timeout", error=f"Timed out after {tool.timeout_seconds:g}s.")
+        except ToolError as e:
+            return ToolResult(**base, status=e.status, error=e.message)  # type: ignore[arg-type]
+        except Exception as e:  # tool crash: contained, classified, recoverable
+            logger.debug("Tool %s crashed", tool.name, exc_info=True)
+            return ToolResult(**base, status="error", error=f"{type(e).__name__}: {e}")
+        return ToolResult(**base, status="ok", data=self._normalize(raw))
 
-        self._log_call(tool_name, params, result)
-        return result
+    @staticmethod
+    def _normalize(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        if hasattr(raw, "model_dump"):
+            return raw.model_dump()
+        if isinstance(raw, (list, tuple)):
+            return {"items": list(raw)}
+        return {"result": raw}
 
-    async def call_with_retry(
-        self,
-        tool_name: str,
-        max_retries: int = 2,
-        **params
-    ) -> ToolResult:
-        """Retry tool call on failure with linear backoff. Returns last result."""
-        result = None
-        for attempt in range(max_retries + 1):
-            result = await self.call(tool_name, **params)
-            if result.success:
-                return result
-            if attempt < max_retries:
-                await asyncio.sleep(1.0 * (attempt + 1))
-        return result  # type: ignore[return-value]
-
-    def _log_call(self, tool_name: str, params: dict, result: ToolResult) -> None:
-        """Thread-safe call logging for dashboard display."""
-        # Truncate large param values for log readability
-        safe_params = {}
-        for k, v in params.items():
-            s = str(v)
-            safe_params[k] = s[:80] + "..." if len(s) > 80 else s
-
-        entry = ToolCallLog(
-            tool_name=tool_name,
-            params=safe_params,
-            result=result,
-            timestamp=datetime.now().isoformat(),
+    def _finish(self, req: ToolRequest, tool: Optional[ToolDefinition],
+                result: ToolResult, started: float) -> ToolResult:
+        result.duration_ms = round((time.monotonic() - started) * 1000, 2)
+        record = ToolCallRecord(
+            request_id=req.request_id, tool=result.tool, capability=req.capability,
+            agent=req.agent, task_id=req.task_id, status=result.status,
+            duration_ms=result.duration_ms, error=result.error[:300], purpose=req.purpose,
         )
-        with self._lock:
-            self._call_log.append(entry)
-            # Keep log bounded
-            if len(self._call_log) > 200:
-                self._call_log = self._call_log[-100:]
-
-    def last_calls(self, n: int = 5) -> List[ToolCallLog]:
-        """Return the last N tool call log entries (for dashboard)."""
-        with self._lock:
-            return list(self._call_log[-n:])
-
-    def list_tools(self, group: Optional[str] = None) -> List[ToolSchema]:
-        """List available tool schemas, optionally filtered by group."""
-        if group:
-            return self.registry.list_by_group(group)
-        return self.registry.all_schemas()
-
-    def total_calls(self) -> int:
-        """Return total number of tool calls made."""
-        with self._lock:
-            return len(self._call_log)
-
-
-# ── MCPGateway (existing, unchanged) ────────────────────────────────────────
-
-class MCPGateway:
-    """
-    Routes tool calls from agents to external MCP server subprocesses.
-    Used when raven_mcp/servers/ are running as separate processes.
-    """
-
-    def __init__(self, registry) -> None:
-        self.registry = registry
-        self.tool_to_server = {t.name: t.server for t in ALL_TOOLS}
-
-    async def call(self, tool_name: str, **params) -> ToolResult:
-        """Invoke a tool via MCP protocol to an external server."""
-        server_name = self.tool_to_server.get(tool_name)
-        if not server_name:
-            return ToolResult(tool_name=tool_name, success=False, data=None, error=f"Unknown tool: {tool_name}")
-
-        session = self.registry.get_session(server_name)
-        if not session:
-            return ToolResult(tool_name=tool_name, success=False, data=None, error=f"Server not running: {server_name}")
-
-        try:
-            result = await session.call_tool(tool_name, arguments=params)
-            content_text = result.content[0].text if result.content else "{}"
-            try:
-                data = json.loads(content_text)
-            except Exception:
-                data = content_text
-            return ToolResult(tool_name=tool_name, success=True, data=data)
-        except Exception as e:
-            return ToolResult(tool_name=tool_name, success=False, data=None, error=str(e))
+        self.calls.append(record)
+        if self._on_call:
+            self._on_call(record)
+        return result

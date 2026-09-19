@@ -7,7 +7,6 @@ Internal service port scanner for sandbox network environments.
 from __future__ import annotations
 
 import asyncio
-import socket
 from typing import List, Tuple
 
 _COMMON_PORTS = [21, 22, 80, 443, 3000, 3306, 5000, 5432, 6379, 8000, 8080, 9200, 27017]
