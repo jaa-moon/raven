@@ -21,6 +21,7 @@ from validation.checks_static import StaticChecks
 from validation.checks_web import WebChecks
 from validation.classifiers import classify_response
 from validation.content import CONTENT_CHECKS, ValidationState, get_validator_for_path, validate_admin_panel
+from validation.checks_injection import InjectionChecks
 from validation.evidence import baseline_evidence, http_evidence
 from validation.outcome import conclude
 
@@ -44,7 +45,7 @@ _STATE_TO_STATUS = {
 _CONF = {"High": Confidence.HIGH, "Medium": Confidence.MEDIUM, "Low": Confidence.LOW}
 
 
-class FindingValidator(WebChecks, StaticChecks, NetChecks):
+class FindingValidator(WebChecks, StaticChecks, NetChecks, InjectionChecks):
     def __init__(self, ctx: ValidationContext) -> None:
         self.ctx = ctx
         self._baselines: Dict[str, SPAFallbackDetector] = {}

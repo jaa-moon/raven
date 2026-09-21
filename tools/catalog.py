@@ -99,6 +99,24 @@ def _file_classify(path: str) -> Dict[str, Any]:
     return file_classify(path)
 
 
+async def _sql_injection_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
+                               timeout: float = 10.0) -> Dict[str, Any]:
+    from tools.injection_probe import sql_probe
+    return await sql_probe(url, parameter, method, location, timeout)
+
+
+async def _xss_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
+                     timeout: float = 10.0) -> Dict[str, Any]:
+    from tools.injection_probe import xss_probe
+    return await xss_probe(url, parameter, method, location, timeout)
+
+
+async def _ssrf_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
+                      timeout: float = 10.0) -> Dict[str, Any]:
+    from tools.injection_probe import ssrf_probe
+    return await ssrf_probe(url, parameter, method, location, timeout)
+
+
 def build_registry() -> ToolRegistry:
     reg = ToolRegistry()
     net = ["web_application", "network_service", "host"]
@@ -177,5 +195,33 @@ def build_registry() -> ToolRegistry:
         capabilities=["file_inspection"], target_types=src, risk_level="passive",
         input_schema={"path": P(required=True), "start": P(type="int", default=1), "end": P(type="int", default=0)},
         scope_args={"path": "path"}, handler=_file_inspect,
+    ))
+
+    WEB = ["web_application"]
+    injection_schema = {
+        "url": P(type="string", required=True), "parameter": P(type="string", required=True),
+        "method": P(type="string", default="GET"), "location": P(type="string", default="query"),
+        "timeout": P(type="float", default=10.0),
+    }
+    reg.register(ToolDefinition(
+        name="sql_injection_probe",
+        description="Controlled boolean/error-based SQL injection probe (baseline + 3 non-destructive payloads).",
+        capabilities=["injection.sql.detect", "injection.sql.validate"], target_types=WEB, risk_level="moderate",
+        input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
+        timeout_seconds=25.0, expensive=True, handler=_sql_injection_probe,
+    ))
+    reg.register(ToolDefinition(
+        name="xss_probe",
+        description="Controlled reflected-XSS probe: one unique-canary payload, context detection, no persistence.",
+        capabilities=["injection.xss.reflect", "injection.xss.validate"], target_types=WEB, risk_level="moderate",
+        input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
+        timeout_seconds=15.0, handler=_xss_probe,
+    ))
+    reg.register(ToolDefinition(
+        name="ssrf_probe",
+        description="Controlled SSRF probe using a Raven-hosted loopback callback canary (never an arbitrary host).",
+        capabilities=["injection.ssrf.detect", "injection.ssrf.validate"], target_types=WEB, risk_level="moderate",
+        input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
+        timeout_seconds=20.0, expensive=True, handler=_ssrf_probe,
     ))
     return reg

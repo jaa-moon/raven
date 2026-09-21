@@ -17,6 +17,7 @@ pip install -r requirements.txt
 
 python raven.py                                   # simple menu: Test / Setup / Help / Version / Exit
 python raven.py assess http://localhost:3000 --depth quick
+python raven.py assess http://localhost:3000 --max-risk moderate   # enables active SQLi/XSS/SSRF probing
 python raven.py assess ./my-project --fail-on high --yes    # --yes = "I am authorized" (CI)
 python raven.py setup                             # optional: configure a local or API LLM
 ```
@@ -55,6 +56,18 @@ State = truth · Report = output.
 Agents can only create candidates. HTTP 200 never confirms anything: candidate paths are compared with a
 nonexistent-route baseline (SPA catch-all detection) and must carry a content signature.
 
+### Active injection testing (SQLi / XSS / SSRF)
+
+`InjectionTestAgent` (`agents/injection.py`) discovers real input surface (forms, query-string parameters,
+the REST `id` convention) and requests `injection.sql.detect` / `injection.xss.reflect` / `injection.ssrf.detect`
+through the gateway — the same scope/budget/recovery path as every other capability. It only raises
+candidates; `validation/checks_injection.py` independently re-probes (via `injection.*.validate`) and requires
+the behavior to repeat before confirming anything. Payloads are non-destructive: boolean/error-based SQL
+probes (no writes), one reflected canary marker for XSS (context-classified, escaped reflection rejected),
+and SSRF detection via a Raven-hosted loopback callback canary rather than an arbitrary external host.
+**Active probing only runs above the default scope risk ceiling** (`assess --max-risk moderate`); below that
+it is recorded as an explicit limitation, never silently skipped, and no active request is ever attempted.
+
 ### Adding a capability
 
 1. Add a tool: `ToolDefinition(name=…, capabilities=[…], input_schema=…, risk_level=…, scope_args=…, handler=…)`
@@ -74,8 +87,14 @@ python -m pytest            # unit + integration (real local servers) + regressi
 
 ## Current limitations (honest list)
 
-- **Not implemented:** authorization/access-control testing, authenticated testing, active injection
-  testing (SQLi/XSS/SSRF…). These appear in every web report as `NOT_ASSESSED`.
+- **Not implemented:** authorization/access-control testing, authenticated testing, and injection types
+  beyond SQLi/XSS/SSRF (e.g. command injection, XXE, template injection). These appear in every web report
+  as `NOT_ASSESSED`.
+- **Active injection testing** (SQLi/XSS/SSRF) only exercises parameters Raven actually discovered (forms,
+  query strings, the REST `id` convention) — it is not a full crawl or fuzzer, and only runs when scope is
+  raised to `--max-risk moderate` or higher. SSRF confirmation depends on the target being able to reach
+  Raven's loopback callback, which is not true across most real network boundaries for a remote target;
+  a rejection there is reported as such, never as proof of absence.
 - **Target types:** URL/web, host/network service, and source directory are supported. Binaries, containers,
   cloud and Kubernetes targets are classified but have no agents yet (coverage reports them as not assessed).
 - Knowledge retrieval is lexical (BM25), not embedding-based.

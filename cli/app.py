@@ -43,12 +43,16 @@ def main(ctx: typer.Context) -> None:
 
 
 def _run_adaptive(target: Optional[str], depth: str, fail_on: str, output: Optional[str], yes: bool = False,
-                  resume: Optional[str] = None) -> None:
+                  resume: Optional[str] = None, max_risk: str = "low") -> None:
     from core.assessment import run_assessment
     from reporting.generator import save, verdict
 
     print_banner(console)
-    console.print(f"  [bold cyan]Target:[/] {target}  |  [bold cyan]Depth:[/] {depth}\n")
+    console.print(f"  [bold cyan]Target:[/] {target}  |  [bold cyan]Depth:[/] {depth}  |  "
+                  f"[bold cyan]Max risk:[/] {max_risk}\n")
+    if max_risk != "low":
+        console.print(f"  [yellow]Active testing enabled (max-risk={max_risk}): controlled SQL injection, "
+                      "XSS and SSRF probes may run against discovered parameters.[/]\n")
 
     # --yes is the explicit non-interactive statement of authorization (e.g. for CI on your own repo).
     if not yes and not typer.confirm("Do you confirm you are authorized to assess this target?"):
@@ -62,8 +66,8 @@ def _run_adaptive(target: Optional[str], depth: str, fail_on: str, output: Optio
         console.print(f"[dim]{kind:12}[/] {msg}")
 
     with console.status(f"[bold green]Running Raven adaptive assessment on {target}...[/]"):
-        state = asyncio.run(run_assessment(target, resume_id=resume, depth=depth, llm_config=cfg, emit=emit,
-                                           authorized=True))
+        state = asyncio.run(run_assessment(target, resume_id=resume, depth=depth, max_risk=max_risk,
+                                           llm_config=cfg, emit=emit, authorized=True))
 
     md_path, json_path = save(state, Path(output) if output else Path("raven_reports"))
     console.print(f"\n[bold green]+ Assessment complete![/]  ID: [cyan]{state.assessment_id}[/]")
@@ -89,12 +93,14 @@ def assess(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Report output directory."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm authorization non-interactively."),
     resume: Optional[str] = typer.Option(None, "--resume", help="Resume a saved assessment by ID."),
+    max_risk: str = typer.Option("low", "--max-risk", help="passive|low|moderate|high. moderate+ enables "
+                                 "active SQL injection/XSS/SSRF probing."),
 ) -> None:
     """Run the adaptive assessment engine against any target type."""
     if not target and not resume:
         console.print("[red]Provide a target or --resume <assessment-id>.[/]")
         raise typer.Exit(code=2)
-    _run_adaptive(target, depth, fail_on, output, yes, resume)
+    _run_adaptive(target, depth, fail_on, output, yes, resume, max_risk)
 
 
 @app.command("scan")
@@ -104,9 +110,10 @@ def scan(
     fail_on: str = typer.Option("none", "--fail-on"),
     output: Optional[str] = typer.Option(None, "--output", "-o"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm authorization non-interactively."),
+    max_risk: str = typer.Option("low", "--max-risk", help="passive|low|moderate|high."),
 ) -> None:
     """Alias for `assess`, kept for existing scripts/CI (e.g. `raven scan . --yes`)."""
-    _run_adaptive(target_path, depth, fail_on, output, yes)
+    _run_adaptive(target_path, depth, fail_on, output, yes, max_risk=max_risk)
 
 
 @app.command("pentest")

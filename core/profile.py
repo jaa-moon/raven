@@ -62,6 +62,7 @@ class TargetProfile(BaseModel):
     def signature(self) -> str:
         """Cheap change detector: differs whenever new knowledge was added."""
         ports = sorted(str(s.get("port")) for s in self.services)
+        injection_surface = self.attributes.get("injection_surface") or {}
         return "|".join([
             self.target_type,
             ",".join(sorted(self.surfaces)),
@@ -70,4 +71,5 @@ class TargetProfile(BaseModel):
             ",".join(ports),
             str(self.authentication),
             str(self.api),
+            str(sum(len(v.get("params", [])) for v in injection_surface.values())),
         ])

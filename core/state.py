@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from core.models import (
-    AgentActivity, CoverageItem, Finding, FindingStatus, Observation,
+    AgentActivity, CoverageItem, Finding, FindingStatus, InjectionHypothesis, Observation,
     RecoveryRecord, TestPlan, TestTask, ToolCallRecord, new_id, now_iso,
 )
 from core.profile import TargetProfile
@@ -40,6 +40,7 @@ class AssessmentState(BaseModel):
 
     observations: List[Observation] = Field(default_factory=list)
     findings: List[Finding] = Field(default_factory=list)
+    injection_hypotheses: List[InjectionHypothesis] = Field(default_factory=list)
 
     tool_calls: List[ToolCallRecord] = Field(default_factory=list)
     recovery_actions: List[RecoveryRecord] = Field(default_factory=list)

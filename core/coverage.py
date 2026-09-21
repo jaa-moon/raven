@@ -45,8 +45,18 @@ SURFACES: List[SurfaceSpec] = [
         note="Access-control testing needs credentials/roles and is not implemented in this build.",
     ),
     SurfaceSpec(
-        name="Injection & input handling", applies_to=WEB, implemented=False,
-        note="Active payload testing (SQLi/XSS/SSRF/...) is not implemented in this build.",
+        name="SQL Injection", applies_to=WEB,
+        note="Active probing only covers discovered parameters (forms, query strings, known REST 'id' "
+             "convention) and requires --max-risk moderate or higher; it is not a full crawl.",
+    ),
+    SurfaceSpec(
+        name="XSS", applies_to=WEB,
+        note="Reflected XSS only, on discovered parameters; DOM-based and stored XSS are not tested.",
+    ),
+    SurfaceSpec(
+        name="SSRF", applies_to=WEB,
+        note="Detection relies on a Raven-hosted loopback callback canary; unreachable across most network "
+             "boundaries for a remote target, so a rejection there is not proof of absence.",
     ),
     SurfaceSpec(name="Network services", applies_to=NET),
     SurfaceSpec(name="Source code", applies_to=SRC),

@@ -256,6 +256,45 @@ class AgentActivity(BaseModel):
     outcome: str = "running"
 
 
+class InjectionType(str, Enum):
+    SQL_INJECTION = "sql_injection"
+    XSS = "xss"
+    SSRF = "ssrf"
+
+
+class InjectionHypothesis(BaseModel):
+    """
+    A structured active-testing hypothesis: 'this input might be exploitable'.
+
+    Created by InjectionTestAgent from discovered input surface (a candidate
+    endpoint/parameter). It records *why* a probe was run and what was
+    observed; it never carries a confirmed verdict itself. If the probe's
+    behavior is interesting, the agent also raises a CANDIDATE Finding
+    (`finding_id`) which only the validator may move to CONFIRMED. This model
+    does not duplicate Finding/Evidence -- it is the audit trail of the test,
+    not the verdict.
+    """
+
+    hypothesis_id: str = Field(default_factory=lambda: new_id("HYP"))
+    type: InjectionType
+    target: str = ""                     # origin/base URL, informational
+    endpoint: str = ""
+    method: str = "GET"
+    parameter: str = ""
+    location: str = "query"              # query | body | header
+    rationale: str = ""
+    baseline_observation: Dict[str, Any] = Field(default_factory=dict)
+    test_observations: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence: List[Evidence] = Field(default_factory=list)
+    confidence: Confidence = Confidence.NONE
+    status: FindingStatus = FindingStatus.CANDIDATE
+    finding_id: str = ""                 # the Finding this hypothesis produced, if any
+    recovery_notes: List[str] = Field(default_factory=list)
+    iteration: int = 0
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
 class Lesson(BaseModel):
     """Validated, reusable knowledge extracted from an assessment."""
 

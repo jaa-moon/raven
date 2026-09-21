@@ -63,7 +63,9 @@ async def test_report_is_honest_for_a_partially_assessed_target(spa_server):
     md = render_markdown(state)
     assert state.overall_state == "PARTIAL"
     assert "Path Discovery Summary" in md and "spa_fallback" in md
-    assert "Authorization" in md and "NOT_ASSESSED" in md and "Injection & input handling" in md
+    assert "Authorization" in md and "NOT_ASSESSED" in md
+    # Active injection testing exists but is capped by default scope (max_risk=low): honestly NOT_ASSESSED.
+    assert "SQL Injection" in md and "SSRF" in md
     assert "clean" not in md.lower()
 
 

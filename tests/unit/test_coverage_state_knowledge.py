@@ -35,7 +35,9 @@ def test_blocked_and_not_applicable_and_unimplemented_are_distinct():
     assert items["Session & cookies"].status == CoverageStatus.BLOCKED
     assert items["Secrets"].status == CoverageStatus.NOT_APPLICABLE
     assert items["Authorization"].status == CoverageStatus.NOT_ASSESSED          # not implemented
-    assert items["Injection & input handling"].status == CoverageStatus.NOT_ASSESSED
+    assert items["SQL Injection"].status == CoverageStatus.NOT_ASSESSED          # planned but not executed
+    assert items["XSS"].status == CoverageStatus.NOT_ASSESSED
+    assert items["SSRF"].status == CoverageStatus.NOT_ASSESSED
 
 
 def test_authentication_can_never_exceed_partial_without_credentials():

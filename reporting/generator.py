@@ -9,7 +9,7 @@ qualified by coverage, and every limitation Raven knows about is listed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from core.models import SEVERITY_RANK, CoverageStatus, Finding, Observation
 from core.state import AssessmentState
@@ -72,6 +72,7 @@ def render_markdown(state: AssessmentState) -> str:
     md += _findings_section("Confirmed Findings", _sorted(state.confirmed_findings))
     md += _findings_section("Inconclusive Findings", _sorted(state.inconclusive_findings), brief=True)
     md += _path_discovery(state)
+    md += _injection_summary(state)
 
     md += ["## Coverage", "", "| Surface | Status | Detail |", "|---|---|---|"]
     for c in state.coverage:
@@ -144,6 +145,25 @@ def _path_discovery(state: AssessmentState) -> List[str]:
         d = o.data
         md.append(f"| `{d.get('path')}` | {d.get('status')} | {d.get('content_type', '') or '-'} | "
                   f"{d.get('classification')} | {'yes' if d.get('path') in confirmed_paths else 'no'} |")
+    return md + [""]
+
+
+def _injection_summary(state: AssessmentState) -> List[str]:
+    hyps = state.injection_hypotheses
+    if not hyps:
+        return []
+    md = ["## Active Injection Testing", "",
+          "Controlled, non-destructive probes only: baseline-compared boolean/error-based SQL injection tests, "
+          "one reflected-XSS canary per parameter, and SSRF tests via a Raven-hosted loopback callback. Every "
+          "candidate below was independently re-tested by the validator before being confirmed or rejected.", "",
+          f"- Parameter tests run: **{len(hyps)}**",
+          f"- Candidates raised for independent validation: **{sum(1 for h in hyps if h.finding_id)}**", "",
+          "| Type | Endpoint | Method | Parameter | Location | Candidate raised | Recovery notes |",
+          "|---|---|---|---|---|---|---|"]
+    for h in hyps:
+        notes = "; ".join(h.recovery_notes)[:60] or "-"
+        md.append(f"| {h.type.value} | `{h.endpoint}` | {h.method} | `{h.parameter}` | {h.location} | "
+                  f"{'yes' if h.finding_id else 'no'} | {notes} |")
     return md + [""]
 
 
