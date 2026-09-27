@@ -27,7 +27,8 @@ def _rel(root: str, file: str) -> str:
 class SourceAssessmentAgent(Agent):
     name = "source_assessment"
     description = "Assesses a source tree for secrets, vulnerable dependencies, unsafe code and misconfiguration."
-    capabilities = ["secret_detection", "dependency_audit", "static_code_analysis", "config_audit"]
+    capabilities = ["secret_detection", "dependency_audit", "static_code_analysis", "config_audit",
+                    "permission_audit"]
 
     def applies(self, profile: TargetProfile) -> bool:
         return profile.target_type == "source_repository" and profile.source_available
@@ -127,4 +128,5 @@ class SourceAssessmentAgent(Agent):
                 remediation="Restrict permissions (e.g. chmod 600/750).",
                 signal={"validator": "file_permission", "path": i.get("file", ""), "issue": i.get("issue", "")})
             n += bool(f)
+        ctx.observe("perms.scan", "File permissions", f"{len(data.get('issues', []))} permission issue(s) found.")
         return n

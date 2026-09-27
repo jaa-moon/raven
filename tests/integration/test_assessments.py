@@ -125,6 +125,24 @@ async def test_source_repo_validation_separates_real_from_false_positives(repo):
     assert "Xk29" not in state.model_dump_json()                        # secret value never stored
 
 
+@pytest.fixture
+def repo_with_config_issue(tmp_path):
+    (tmp_path / "requirements.txt").write_text("flask==2.0.1\n")
+    (tmp_path / ".env").write_text("DATABASE_URL=postgres://app:hunter2@db/app\nDEBUG=True\n")
+    return tmp_path
+
+
+async def test_config_scanner_finding_is_raised_and_confirmed_on_revalidation(repo_with_config_issue):
+    from core.assessment import run_assessment
+    state = await run_assessment(str(repo_with_config_issue), **FAST)
+    misconfig = next(f for f in state.findings if f.category == "SecurityMisconfiguration")
+    assert misconfig.signal["validator"] == "config_setting"
+    assert misconfig.signal["file"] == ".env" and misconfig.signal["line"] == 2
+    assert misconfig.status == FindingStatus.CONFIRMED                 # verified in B.2: unchanged file re-reads identical
+    cov = {c.surface: c for c in state.coverage}
+    assert cov["Configuration"].status == CoverageStatus.ASSESSED
+
+
 async def test_repo_coverage_marks_unavailable_capability_blocked(repo):
     from core.assessment import run_assessment
     state = await run_assessment(str(repo), **FAST)

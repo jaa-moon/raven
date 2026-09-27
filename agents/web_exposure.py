@@ -53,14 +53,18 @@ class WebExposureAgent(Agent):
         if det is None:
             ctx.state.add_limitation("No route baseline could be established; path exposure results are less reliable.")
         title = det.baseline.title if det and det.baseline else ""
-        raised = failures = 0
+        raised = 0
+        failed_paths: List[str] = []
         for path in task.params["paths"]:
             url = url_for(ctx.profile, path)
             res = await ctx.call("http_request", {"url": url}, f"Probe {path}")
             if not res.ok:
-                failures += 1
-                if failures >= 3:
+                failed_paths.append(path)
+                if len(failed_paths) >= 3:
                     return AgentResult(success=False, error=res.error)
+                ctx.observe("path.fetch_failed", "Exposed paths & files",
+                            f"{path} could not be fetched: {res.error or 'unknown error'}",
+                            path=path, error=res.error)
                 continue
             cls = classify(path, res.data, det)
             ctx.observe("path.candidate", "Exposed paths & files", f"{path} -> {cls.classification.value}",
@@ -86,4 +90,12 @@ class WebExposureAgent(Agent):
                 remediation="Deny access to this resource at the web server or remove it.",
                 reproduction=[f"curl -s {url}"],
                 signal={"validator": "http_path_exposure", "url": url, "path": path})
-        return AgentResult(summary=f"{raised} candidate(s) from {len(task.params['paths'])} paths")
+        total = len(task.params["paths"])
+        if failed_paths:
+            ctx.state.add_limitation(
+                f"{task.title}: {len(failed_paths)} of {total} path(s) could not be fetched "
+                f"({', '.join(failed_paths)}); those paths were not actually checked.")
+            return AgentResult(
+                summary=f"{raised} candidate(s) from {total} paths "
+                        f"({len(failed_paths)} path(s) could not be fetched: {', '.join(failed_paths)})")
+        return AgentResult(summary=f"{raised} candidate(s) from {total} paths")

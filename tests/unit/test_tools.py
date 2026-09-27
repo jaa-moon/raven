@@ -49,6 +49,20 @@ def test_code_scanner_ignores_comments_and_reports_lines(tmp_path):
     assert {(i["rule"], i["line"]) for i in issues} == {("code-eval", 2), ("cmd-os-system", 4)}
 
 
+def test_config_scanner_flags_debug_mode_and_ignores_comments_and_false_values(tmp_path):
+    (tmp_path / ".env").write_text(
+        "# DEBUG=True\n"          # comment: must be ignored
+        "DEBUG=True\n"            # line 2: must be flagged (CONF-001)
+        "DEBUG=False\n"           # line 3: must NOT be flagged (no "False" in the pattern's alternation)
+    )
+    from tools.config_scanner import ConfigScanner
+    out = ConfigScanner(str(tmp_path)).scan()
+    assert out["vulnerable"] is True
+    hits = [i for i in out["issues"] if i["check_id"] == "CONF-001"]
+    assert {(i["line"], i["file"]) for i in hits} == {(2, ".env")}
+    assert out["issues_count"] == 1
+
+
 def test_inventory_and_file_classification(tmp_path):
     (tmp_path / "app.py").write_text("x=1")
     (tmp_path / "package.json").write_text('{"dependencies": {"express": "4.0.0"}}')
