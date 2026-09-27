@@ -54,6 +54,9 @@ def render_markdown(state: AssessmentState) -> str:
     md: List[str] = ["# Raven Security Assessment Report", ""]
     md += [f"- **Assessment ID**: `{state.assessment_id}`",
            f"- **Target**: `{t.normalized_target if t else p.target}` ({p.target_type})",
+           f"- **Risk level**: `{state.scope.max_risk}`"
+           + ("  (active injection testing enabled)" if state.scope.max_risk in ("moderate", "high")
+              else "  (passive/low only — active injection testing disabled)"),
            f"- **Duration**: {_duration(state)}  |  **Tool calls**: {len(state.tool_calls)}",
            f"- **Overall assessment state**: **{_STATE_TEXT.get(state.overall_state, state.overall_state)}**", ""]
 
@@ -152,10 +155,16 @@ def _injection_summary(state: AssessmentState) -> List[str]:
     hyps = state.injection_hypotheses
     if not hyps:
         return []
+    surface = state.profile.attributes.get("injection_surface", {}) or {}
+    discovered = sum(len(v.get("params", [])) for v in surface.values())
     md = ["## Active Injection Testing", "",
-          "Controlled, non-destructive probes only: baseline-compared boolean/error-based SQL injection tests, "
-          "one reflected-XSS canary per parameter, and SSRF tests via a Raven-hosted loopback callback. Every "
-          "candidate below was independently re-tested by the validator before being confirmed or rejected.", "",
+          "Controlled, non-destructive probes only: baseline-compared boolean/error-based SQL injection tests "
+          "(two benign baselines measure the response's natural jitter so length noise cannot false-positive), "
+          "one reflected-XSS canary per parameter with break-out analysis, and SSRF tests via a Raven-hosted "
+          "loopback callback. Every candidate below was independently re-tested by the validator before being "
+          "confirmed or rejected. Discovery is limited to input surface Raven actually observed; it is not a "
+          "full crawl or fuzzer.", "",
+          f"- Input surface discovered: **{discovered}** parameter(s) across **{len(surface)}** endpoint(s)",
           f"- Parameter tests run: **{len(hyps)}**",
           f"- Candidates raised for independent validation: **{sum(1 for h in hyps if h.finding_id)}**", "",
           "| Type | Endpoint | Method | Parameter | Location | Candidate raised | Recovery notes |",

@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 from config.manager import ConfigManager
+from core.budget import BudgetLimits
 from core.target import TargetError, parse_target
 from reporting.generator import save, verdict
 from ui.banner import print_banner
@@ -29,10 +30,29 @@ MENU = """[bold]1.[/] Test
 [bold]4.[/] Version
 [bold]5.[/] Exit"""
 
+# One place maps the menu choice to the canonical risk string used everywhere
+# else (Scope.max_risk). There is no separate "menu risk" value.
+RISK_CHOICES = {"1": "low", "2": "moderate", "3": "high"}
+RISK_PANEL = (
+    "[bold]1. Low[/]\n   Passive and low-impact assessment. Active injection testing is disabled.\n\n"
+    "[bold]2. Moderate[/]\n   Enables controlled active security testing (SQL injection, XSS, SSRF) on "
+    "discovered parameters. Scope, budget, timeouts and independent validation all still apply — this is "
+    "not unrestricted exploitation.\n\n"
+    "[bold]3. High[/]\n   Enables broader active testing where implemented. No additional high-risk "
+    "capabilities exist in this build yet, so High currently runs the same controlled probes as Moderate."
+)
+
 
 def show_menu() -> None:
     print_banner(console)
     console.print(Panel(MENU, title="Raven — Autonomous Security Platform", border_style="magenta"))
+
+
+def ask_risk_level() -> str:
+    """Prompt for the assessment risk level and return the canonical risk string."""
+    console.print(Panel(RISK_PANEL, title="Assessment Risk Level", border_style="yellow"))
+    choice = Prompt.ask("Select risk level", choices=["1", "2", "3"], default="1")
+    return RISK_CHOICES[choice]
 
 
 async def run_test_flow(target_str: str | None = None, depth: str = "standard") -> None:
@@ -45,7 +65,24 @@ async def run_test_flow(target_str: str | None = None, depth: str = "standard") 
         console.print(f"[red]{e}[/]")
         return
 
-    if not Confirm.ask(f"Do you confirm you are authorized to assess [cyan]{parsed.normalized_target}[/]?", default=False):
+    risk = ask_risk_level()
+
+    # Show the full configuration before anything runs, so enabling active
+    # testing is always an explicit, visible decision.
+    limits = BudgetLimits.for_depth(depth)
+    console.print(Panel(
+        f"[cyan]Target:[/] {parsed.normalized_target}\n"
+        f"[cyan]Target type:[/] {parsed.input_type.value}\n"
+        f"[cyan]Depth:[/] {depth}\n"
+        f"[cyan]Risk level:[/] [bold]{risk.upper()}[/]\n"
+        f"[cyan]Budget:[/] {limits.max_tool_calls} tool calls / {limits.max_seconds:.0f}s",
+        title="Assessment configuration", border_style="cyan"))
+    if risk != "low":
+        console.print("[yellow]Active testing enabled: controlled SQL injection, XSS and SSRF probes may run "
+                      "against discovered parameters (scope, budget and validation still apply).[/]")
+
+    if not Confirm.ask(f"Start assessment — you confirm you are authorized to assess "
+                       f"[cyan]{parsed.normalized_target}[/]?", default=False):
         console.print("[red]Assessment aborted.[/]")
         return
 
@@ -57,8 +94,9 @@ async def run_test_flow(target_str: str | None = None, depth: str = "standard") 
     def emit(kind: str, msg: str) -> None:
         console.print(f"[dim]{kind:12}[/] {msg}")
 
-    with console.status(f"[bold green]Assessing {parsed.normalized_target}...[/]"):
-        state = await run_assessment(target_str, depth=depth, llm_config=cfg, emit=emit, authorized=True)
+    with console.status(f"[bold green]Assessing {parsed.normalized_target} at {risk} risk...[/]"):
+        state = await run_assessment(target_str, depth=depth, max_risk=risk, llm_config=cfg,
+                                     emit=emit, authorized=True)
 
     md_path, json_path = save(state, Path("raven_reports"))
     console.print(f"\n[bold]{state.overall_state}[/] — {verdict(state)}")

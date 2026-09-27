@@ -23,13 +23,21 @@ def _by_category(state, category):
 
 # ── end-to-end confirmation, one per injection type ────────────────────────────
 
+def _confirmed(findings):
+    return [f for f in findings if f.status == FindingStatus.CONFIRMED]
+
+
 async def test_sql_injection_is_discovered_probed_and_confirmed_end_to_end(vulnerable_server):
+    # Input-surface discovery v2 also raises SQLi candidates on spec-derived and
+    # sniffed-path parameters that this fixture never actually mishandles, so more
+    # than one SQLInjection candidate can legitimately exist; only the real /search
+    # `q` vulnerability should ever be CONFIRMED, and never index-0-by-accident.
     from core.assessment import run_assessment
     state = await run_assessment(vulnerable_server.url, max_risk="moderate",
                                  limits=GENEROUS, **FAST)
     sqli = _by_category(state, "SQLInjection")
-    assert sqli and sqli[0].status == FindingStatus.CONFIRMED
-    assert sqli[0].validator == "sql_injection"
+    confirmed = _confirmed(sqli)
+    assert confirmed and confirmed[0].validator == "sql_injection"
     assert any(h.type.value == "sql_injection" and h.finding_id for h in state.injection_hypotheses)
 
 
@@ -38,8 +46,8 @@ async def test_reflected_xss_is_discovered_probed_and_confirmed_end_to_end(vulne
     state = await run_assessment(vulnerable_server.url, max_risk="moderate",
                                  limits=GENEROUS, **FAST)
     xss = _by_category(state, "CrossSiteScripting")
-    assert xss and xss[0].status == FindingStatus.CONFIRMED
-    assert xss[0].validator == "reflected_xss"
+    confirmed = _confirmed(xss)
+    assert confirmed and confirmed[0].validator == "reflected_xss"
 
 
 async def test_ssrf_is_discovered_probed_and_confirmed_end_to_end(vulnerable_server):
@@ -47,8 +55,75 @@ async def test_ssrf_is_discovered_probed_and_confirmed_end_to_end(vulnerable_ser
     state = await run_assessment(vulnerable_server.url, max_risk="moderate",
                                  limits=GENEROUS, **FAST)
     ssrf = _by_category(state, "ServerSideRequestForgery")
-    assert ssrf and ssrf[0].status == FindingStatus.CONFIRMED
-    assert ssrf[0].validator == "ssrf"
+    confirmed = _confirmed(ssrf)
+    assert confirmed and confirmed[0].validator == "ssrf"
+
+
+# ── input-surface discovery: action-less forms are found and tested ───────────
+
+async def test_actionless_form_parameter_is_discovered_and_tested(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, max_risk="moderate",
+                                 limits=GENEROUS, **FAST)
+    surface = state.profile.attributes.get("injection_surface", {})
+    all_params = {p["name"] for v in surface.values() for p in v.get("params", [])}
+    assert "token" in all_params                                    # action-less form on "/" was parsed
+    assert any(h.parameter == "token" for h in state.injection_hypotheses)
+
+
+# ── input-surface discovery v2: path segments, cookies, OpenAPI/Swagger ────────
+
+async def test_rest_path_id_segment_is_discovered_and_tested_as_a_path_parameter(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, max_risk="moderate",
+                                 limits=GENEROUS, **FAST)
+    surface = state.profile.attributes.get("injection_surface", {})
+    widget_params = surface.get("/widgets/7", {}).get("params", [])
+    assert {"name": "7", "location": "path", "evidence": "observed"} in widget_params
+    assert any(h.endpoint == "/widgets/7" and h.location == "path" for h in state.injection_hypotheses)
+
+
+async def test_set_cookie_names_are_discovered_as_cookie_parameters(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, max_risk="moderate",
+                                 limits=GENEROUS, **FAST)
+    surface = state.profile.attributes.get("injection_surface", {})
+    root_params = surface.get("/", {}).get("params", [])
+    names = {p["name"]: p for p in root_params}
+    assert names["session"]["location"] == "cookie" and names["session"]["evidence"] == "cookie"
+    assert "_ga" not in names                                  # analytics cookie excluded, not app input
+
+
+async def test_openapi_spec_parameters_are_discovered_with_spec_evidence(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, max_risk="moderate",
+                                 limits=GENEROUS, **FAST)
+    surface = state.profile.attributes.get("injection_surface", {})
+    product = surface.get("/rest/products/1", {}).get("params", [])
+    by_name = {p["name"]: p for p in product}
+    assert by_name["verbose"] == {"name": "verbose", "location": "query", "evidence": "spec"}
+    assert by_name["1"]["location"] == "path" and by_name["1"]["evidence"] == "spec"
+    search = surface.get("/rest/products/search", {}).get("params", [])
+    search_names = {p["name"] for p in search}
+    assert {"query", "category"} <= search_names
+    assert all(p["evidence"] == "spec" and p["location"] == "body"
+              for p in search if p["name"] in ("query", "category"))
+
+
+# ── evidence-aware prioritization: spec/form beat guesses, auth surfaces rank higher ──
+
+def test_spec_evidence_outranks_a_bare_naming_convention_guess():
+    from agents.injection import InjectionType, _task_priority
+    spec_score = _task_priority(InjectionType.SQL_INJECTION, "/rest/products/1", "verbose", "spec")
+    guessed_score = _task_priority(InjectionType.SQL_INJECTION, "/api/Widgets", "id", "guessed")
+    assert spec_score > guessed_score
+
+
+def test_auth_sensitive_endpoint_outranks_an_equally_evidenced_generic_one():
+    from agents.injection import InjectionType, _task_priority
+    login_score = _task_priority(InjectionType.SQL_INJECTION, "/rest/user/login", "email", "form")
+    generic_score = _task_priority(InjectionType.SQL_INJECTION, "/api/Widgets", "email", "form")
+    assert login_score > generic_score
 
 
 # ── scope enforcement: active testing is off by default, never silently ───────
@@ -67,6 +142,34 @@ async def test_active_testing_is_blocked_by_default_scope_and_recorded_honestly(
     assert cov["SSRF"].status == CoverageStatus.NOT_ASSESSED
     md = render_markdown(state)
     assert "clean" not in md.lower()
+
+
+# ── risk level is recorded and drives honest coverage reasons ─────────────────
+
+def test_report_records_selected_risk_level():
+    from core.scope import Scope
+    from core.state import AssessmentState
+    state = AssessmentState()
+    state.scope = Scope(max_risk="moderate")
+    md = render_markdown(state)
+    assert "Risk level" in md and "moderate" in md and "active injection testing enabled" in md.lower()
+
+
+async def test_low_risk_injection_coverage_gives_risk_reason_not_clean(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, limits=GENEROUS, **FAST)   # default low
+    cov = {c.surface: c for c in state.coverage}
+    assert cov["SQL Injection"].status == CoverageStatus.NOT_ASSESSED
+    assert "risk policy" in cov["SQL Injection"].detail.lower()
+    assert "not vulnerable" not in cov["SQL Injection"].detail.lower()
+
+
+async def test_high_risk_notes_absence_of_additional_high_risk_capabilities(vulnerable_server):
+    from core.assessment import run_assessment
+    state = await run_assessment(vulnerable_server.url, max_risk="high", limits=GENEROUS, **FAST)
+    assert any("no capabilities requiring 'high' risk" in l.lower() for l in state.limitations)
+    # High still reaches the controlled active tests (same as moderate).
+    assert _by_category(state, "SQLInjection")
 
 
 # ── coverage / reporting honesty ────────────────────────────────────────────────

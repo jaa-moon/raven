@@ -10,35 +10,25 @@ HTTP 500/200/length delta is never, by itself, treated as proof.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
+from core.injection_signals import sql_signals, ssrf_signals, xss_signals
 from core.models import Confidence, Evidence, Finding, FindingStatus
 from validation.outcome import conclude
 
 
-def _sql_signal(data: Dict[str, Any]) -> Tuple[bool, bool]:
-    tests = data.get("tests", {})
-    base, quote = tests.get("baseline", {}), tests.get("quote", {})
-    true_r, false_r = tests.get("true", {}), tests.get("false", {})
-    error_based = bool(quote.get("sql_error_signature") or true_r.get("sql_error_signature")
-                       or false_r.get("sql_error_signature"))
-    b_status, t_status, f_status = base.get("status_code"), true_r.get("status_code"), false_r.get("status_code")
-    b_len = len(base.get("body", "") or "")
-    t_len, f_len = len(true_r.get("body", "") or ""), len(false_r.get("body", "") or "")
-    boolean_based = bool(
-        t_status == b_status and abs(t_len - b_len) < max(20, b_len * 0.05)
-        and (f_status != b_status or abs(f_len - b_len) > max(40, b_len * 0.1)))
-    return error_based, boolean_based
-
-
 def _sql_evidence(url: str, parameter: str, data: Dict[str, Any], note: str) -> Evidence:
     tests = data.get("tests", {})
+    s = sql_signals(tests)
     return Evidence(
         kind="tool_output", source_tool="sql_injection_probe", summary=note,
-        data={"url": url, "parameter": parameter,
+        data={"url": url, "parameter": parameter, "test_inputs": "benign baseline x2, single-quote, "
+              "boolean-true (OR 1=1), boolean-false (AND 1=2) -- all read-only",
               "status_by_test": {k: v.get("status_code") for k, v in tests.items()},
               "length_by_test": {k: len(v.get("body", "") or "") for k, v in tests.items()},
-              "sql_error_signature_by_test": {k: v.get("sql_error_signature") for k, v in tests.items()}})
+              "sql_error_signature_by_test": {k: v.get("sql_error_signature") for k, v in tests.items()},
+              "baseline_jitter_bytes": s["jitter"],
+              "error_based": s["error_based"], "boolean_based": s["boolean_based"]})
 
 
 class InjectionChecks:
@@ -58,8 +48,9 @@ class InjectionChecks:
 
         ev = [_sql_evidence(url, parameter, runs[0], "First independent re-test."),
               _sql_evidence(url, parameter, runs[1], "Second independent re-test (repeatability check).")]
-        e0, b0 = _sql_signal(runs[0])
-        e1, b1 = _sql_signal(runs[1])
+        s0, s1 = sql_signals(runs[0].get("tests", {})), sql_signals(runs[1].get("tests", {}))
+        e0, b0 = s0["error_based"], s0["boolean_based"]
+        e1, b1 = s1["error_based"], s1["boolean_based"]
         if e0 and e1:
             return conclude(f, FindingStatus.CONFIRMED, Confidence.HIGH,
                             "A single quote reproducibly triggers a database-error signature across two "
@@ -88,10 +79,13 @@ class InjectionChecks:
             return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,
                             f"Could not re-run the XSS probe: {res.error}", "reflected_xss")
         d = res.data
+        s = xss_signals(d)
         ev = [Evidence(kind="tool_output", source_tool="xss_probe",
-                       summary=f"Independent re-test with a fresh canary token (context: {d.get('context')}).",
-                       data={"url": url, "parameter": parameter, "context": d.get("context"),
-                             "marker_reflected": d.get("marker_reflected"), "escaped": d.get("escaped")})]
+                       summary=f"Independent re-test with a fresh canary token (context: {s['context']}).",
+                       data={"url": url, "parameter": parameter, "method": method, "location": location,
+                             "test_input": "one unique, non-persisted reflected canary marker",
+                             "context": s["context"], "marker_reflected": d.get("marker_reflected"),
+                             "tag_breakout": d.get("tag_breakout"), "escaped": d.get("escaped")})]
         if not d.get("marker_reflected"):
             return conclude(f, FindingStatus.REJECTED, Confidence.NONE,
                             "The payload was not reflected on independent re-test.", "reflected_xss", ev)
@@ -99,14 +93,14 @@ class InjectionChecks:
             return conclude(f, FindingStatus.REJECTED, Confidence.NONE,
                             "The payload is reflected but HTML-escaped; this is reflection, not executable XSS.",
                             "reflected_xss", ev)
-        if d.get("context") in ("html_body", "html_attribute", "javascript"):
+        if s["executable"]:
             return conclude(f, FindingStatus.CONFIRMED, Confidence.HIGH,
-                            "An unescaped, attacker-controlled marker is reflected in an executable "
-                            f"{str(d.get('context')).replace('_', ' ')} context on independent re-test.",
+                            "An unescaped injected metacharacter breaks out at the reflection site in an "
+                            f"executable {s['context'].replace('_', ' ')} context on independent re-test.",
                             "reflected_xss", ev)
         return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,
-                        "The marker is reflected unescaped but its context could not be classified as executable.",
-                        "reflected_xss", ev)
+                        "The marker is reflected unescaped but no injected metacharacter breaks out of its "
+                        "context, so executability could not be confirmed.", "reflected_xss", ev)
 
     async def _v_ssrf(self, f: Finding) -> Finding:  # type: ignore[misc]
         sig = f.signal
@@ -119,21 +113,25 @@ class InjectionChecks:
             return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,
                             f"Could not re-run the SSRF probe: {res.error}", "ssrf")
         d = res.data
+        s = ssrf_signals(d)
         ev = [Evidence(kind="tool_output", source_tool="ssrf_probe",
-                       summary="Independent re-test with a fresh callback token.",
-                       data={"url": url, "parameter": parameter, "callback_received": d.get("callback_received"),
+                       summary="Independent re-test with a fresh, unique callback token.",
+                       data={"url": url, "parameter": parameter, "method": method, "location": location,
+                             "test_input": "a Raven-hosted loopback callback URL carrying a unique token",
+                             "callback_available": d.get("callback_available", True),
+                             "callback_received": d.get("callback_received"),
                              "application_accepted": d.get("application_accepted")})]
-        if d.get("callback_received"):
+        if s["state"] == "callback_received":
             return conclude(f, FindingStatus.CONFIRMED, Confidence.HIGH,
-                            "Raven's callback canary independently received a connection after the parameter was "
-                            "set to its URL, on a fresh token: the server actually performed the request.",
-                            "ssrf", ev)
-        if d.get("application_accepted"):
+                            "Raven's callback canary independently received a connection carrying a fresh unique "
+                            "token after the parameter was set to its URL: the server actually performed the "
+                            "request.", "ssrf", ev)
+        if s["state"] == "mechanism_unavailable":
             return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,
-                            "The application accepted the supplied URL without an immediate rejection, but the "
-                            "callback was never reached; this shows acceptance, not a confirmed server-side "
-                            "request (the target may be unable to reach Raven's loopback callback, e.g. across a "
-                            "network boundary).", "ssrf", ev)
+                            "SSRF could not be tested: Raven's loopback callback listener was unavailable this "
+                            "run. This is not evidence of absence.", "ssrf", ev)
+        if s["state"] == "accepted_no_callback":
+            return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW, s["why"], "ssrf", ev)
         return conclude(f, FindingStatus.REJECTED, Confidence.NONE,
                         "The application neither accepted the supplied URL nor triggered the callback on "
                         "independent re-test.", "ssrf", ev)

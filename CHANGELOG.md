@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased - Input Surface Discovery v2 and evidence-aware active-testing prioritization
+
+Addresses the two gaps identified after the first live active-injection run: discovery was narrowly
+centered on the discovered `id` query parameter, and the planner had no way to prefer high-value active
+tests over low-value generic breadth tasks once the budget tightened. No change to scope/budget/gateway
+enforcement or to independent validation.
+
+### Added
+- **REST path parameters**: a trailing numeric, UUID, or Mongo-ObjectId-like path segment — on a link on
+  the fetched page or on any endpoint already known from other agents — is now discovered and tested as a
+  path parameter (e.g. `/api/Widgets/7`), not just query-string `id`s. `tools/injection_probe._place` gained
+  a `location="path"` substitution that replaces exactly that literal segment.
+- **Cookies**: names from the target's own `Set-Cookie` responses are discovered as input surface (excluding
+  known third-party/analytics cookies), since session/state cookies are a common injection vector.
+- **OpenAPI/Swagger spec parsing**: when a spec is published at a known path (`/openapi.json`,
+  `/swagger.json`, `/api-docs`, `/v2/api-docs`), Raven now parses it for real query, path, and JSON-body
+  parameter names — the only way to learn request-body fields without executing client-side JavaScript, and
+  the strongest evidence tier discovery has.
+- Every discovered parameter now carries an **evidence tag** (`spec` / `form` / `cookie` / `observed` /
+  `guessed`) recording how it was found, surfaced in each task's rationale.
+
+### Changed
+- **Task priority is now evidence-aware** (`agents/injection.py::_task_priority`) instead of a fixed
+  per-injection-type constant: it combines a base score per injection class, a bonus for stronger evidence
+  (a spec definition or real form field outranks a bare naming-convention guess), and a bonus when the
+  endpoint or parameter name looks security-sensitive (login/auth/admin/password/token/...). This is a
+  scoring mechanism, not a hardcoded priority list, so under a tight budget the planner now spends active-
+  testing budget on the parameters most likely to matter instead of treating every discovered `id` the same.
+- SSRF hypotheses are only proposed for `query`/`body` locations (a path segment or cookie name is never
+  itself a plausible server-fetched URL).
+
+### Still not implemented (honest gap)
+- Blind/arbitrary header fuzzing (e.g. `X-Forwarded-Host`) and JSON body fields with neither a spec nor a
+  form to evidence them remain out of scope — Raven still never guesses input surface it hasn't observed.
+- **GraphQL variables** are still not fed into active injection testing at all. `WebReconAgent` only runs a
+  passive introspection check (`GraphQLIntrospectionEnabled`); `InjectionTestAgent` never builds an
+  `injection_surface` entry from a GraphQL schema or query, so SQLi/XSS/SSRF on GraphQL arguments is
+  untested and reported as `NOT_ASSESSED`, never as clean.
+
+## Unreleased - Risk level made user-configurable
+
+Exposed the existing (already-enforced) assessment risk control through the normal user-facing flow.
+No change to the security model: ScopeValidator, BudgetManager and the Gateway remain authoritative.
+
+### Added
+- **Interactive menu risk selection**: the Test flow now prompts for Low / Moderate / High, shows the full
+  configuration (target, type, depth, risk, budget) before the run, and warns when active testing is enabled.
+  The menu and the `--max-risk` CLI flag funnel into the same `run_assessment(max_risk=...)` path — one source
+  of truth (`Scope.max_risk`), no parallel risk values.
+- `--max-risk` on the `pentest` alias (already present on `assess`/`scan`); the flag is now validated against
+  `passive|low|moderate|high`.
+- The report header now records the selected **Risk level** and whether active injection testing was enabled.
+- When `high` is selected but no high-risk capabilities exist, the run records an explicit limitation rather
+  than implying extra testing happened.
+
+### Changed
+- Coverage for SQL Injection / XSS / SSRF now gives an explicit NOT_ASSESSED reason — "blocked by risk policy"
+  or "no eligible input surface discovered" — instead of a generic "no test was planned", so an unassessed
+  surface is never mistaken for "not vulnerable".
+
+## Unreleased - Active Injection Testing hardening
+
+Strengthened Active Injection Testing v1 without changing Raven's architecture or safety guarantees
+(scope/budget/gateway/independent-validation all preserved).
+
+### Changed
+- **SQL injection** now sends two benign baselines to measure the response's natural byte-length jitter,
+  and confirms boolean-based injection only when the true/false divergence exceeds that jitter *and* the
+  two branches differ from each other. A database-error signature counts only when it is absent from the
+  baseline. A bare 500, a length change, or a timing difference is still never proof on its own.
+- **XSS** detection now checks that an injected metacharacter actually breaks out at the reflection site
+  (`tag_breakout`) rather than treating mere marker presence as executable; partially-escaped reflections
+  are correctly rejected as reflection, not XSS.
+- **SSRF** distinguishes "callback mechanism unavailable" from "callback not observed", so an unbindable
+  loopback listener is reported as untested, never as absence of the vulnerability.
+- **Input-surface discovery** now handles action-less forms (submitting to the current page), `<textarea>`
+  /`<select>` names, and query strings on already-discovered endpoints — no new crawler.
+- Candidate/validator signal math is unified in `core/injection_signals.py`, so the threshold used to raise
+  a candidate can no longer drift from the one used to confirm it.
+
+### Fixed
+- Raw HTTP response bodies are no longer persisted in a candidate's stored signal or hypothesis trail; only
+  redacted per-test metrics (status, length, error-signature) are kept.
+
 ## 3.1.0 - Adaptive engine rebuild
 
 Complete rework around a target-agnostic, adaptive architecture (see README).

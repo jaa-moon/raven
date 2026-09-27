@@ -205,7 +205,7 @@ def build_registry() -> ToolRegistry:
     }
     reg.register(ToolDefinition(
         name="sql_injection_probe",
-        description="Controlled boolean/error-based SQL injection probe (baseline + 3 non-destructive payloads).",
+        description="Controlled boolean/error-based SQL injection probe (two benign baselines for jitter + 3 non-destructive payloads).",
         capabilities=["injection.sql.detect", "injection.sql.validate"], target_types=WEB, risk_level="moderate",
         input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
         timeout_seconds=25.0, expensive=True, handler=_sql_injection_probe,

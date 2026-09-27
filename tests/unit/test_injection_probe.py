@@ -60,6 +60,29 @@ async def test_xss_probe_reports_absent_when_parameter_is_not_reflected(vulnerab
     assert data["context"] == "absent"
 
 
+async def test_xss_probe_treats_partial_escaping_as_non_executable(vulnerable_server):
+    # /greet escapes the tag-opening '<'/'>' (only). The marker is reflected, but
+    # no metacharacter opens a tag -> reflection, not executable XSS.
+    data = await xss_probe(vulnerable_server.url + "/greet", "name")
+    assert data["marker_reflected"] is True
+    assert data["tag_breakout"] is False
+    assert data["escaped"] is True
+
+
+async def test_sql_probe_captures_two_baselines_for_jitter(vulnerable_server):
+    data = await sql_probe(vulnerable_server.url + "/search", "q")
+    assert "baseline" in data["tests"] and "baseline2" in data["tests"]
+
+
+async def test_ssrf_probe_reports_mechanism_unavailable_when_listener_fails(vulnerable_server, monkeypatch):
+    async def _boom(token):
+        raise OSError("cannot bind loopback listener")
+    monkeypatch.setattr("tools.injection_probe._run_canary", _boom)
+    data = await ssrf_probe(vulnerable_server.url + "/fetch", "url", settle=0.1)
+    assert data["callback_available"] is False
+    assert data["callback_received"] is False
+
+
 async def test_ssrf_probe_detects_controlled_callback(vulnerable_server):
     data = await ssrf_probe(vulnerable_server.url + "/fetch", "url", settle=0.3)
     assert data["application_accepted"] is True

@@ -49,3 +49,73 @@ def test_invalid_target_is_reported_cleanly():
 
 def test_report_command_missing_id():
     assert runner.invoke(app, ["report", "ASM-nope"]).exit_code == 1
+
+
+# ── risk-level configuration: one source of truth, CLI flag and menu agree ─────
+
+def _capture_run(monkeypatch):
+    """Replace run_assessment with a stub that records the kwargs it was given."""
+    captured: dict = {}
+
+    async def fake_run(target=None, **kw):
+        from core.state import AssessmentState
+        captured["target"] = target
+        captured.update(kw)
+        return AssessmentState()
+
+    monkeypatch.setattr("core.assessment.run_assessment", fake_run)
+    return captured
+
+
+def test_assess_default_risk_is_low(tmp_path, monkeypatch):
+    cap = _capture_run(monkeypatch)
+    r = runner.invoke(app, ["assess", "http://localhost:3000", "-y", "-o", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert cap["max_risk"] == "low"
+
+
+def test_assess_max_risk_moderate_is_wired_through(tmp_path, monkeypatch):
+    cap = _capture_run(monkeypatch)
+    r = runner.invoke(app, ["assess", "http://localhost:3000", "--max-risk", "moderate", "-y", "-o", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert cap["max_risk"] == "moderate"
+
+
+def test_assess_max_risk_high_is_wired_through(tmp_path, monkeypatch):
+    cap = _capture_run(monkeypatch)
+    r = runner.invoke(app, ["assess", "http://localhost:3000", "--max-risk", "high", "-y", "-o", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert cap["max_risk"] == "high"
+
+
+def test_assess_invalid_risk_is_rejected(tmp_path, monkeypatch):
+    _capture_run(monkeypatch)
+    r = runner.invoke(app, ["assess", "http://localhost:3000", "--max-risk", "nuke", "-y", "-o", str(tmp_path)])
+    assert r.exit_code == 2 and "invalid --max-risk" in r.output.lower()
+
+
+async def test_menu_and_cli_flag_produce_the_same_risk_config(tmp_path, monkeypatch):
+    """Selecting 'Moderate' in the menu yields the same max_risk the CLI flag does."""
+    import cli.menu as menu
+
+    captured: dict = {}
+
+    async def fake_run(target=None, **kw):
+        from core.state import AssessmentState
+        captured.update(kw)
+        return AssessmentState()
+
+    monkeypatch.setattr("core.assessment.run_assessment", fake_run)
+    monkeypatch.setattr(menu, "save", lambda s, d: (tmp_path / "r.md", tmp_path / "r.json"))
+    monkeypatch.setattr(menu.ConfigManager, "is_configured", lambda self: False)
+    monkeypatch.setattr(menu.Prompt, "ask", staticmethod(lambda *a, **k: "2"))   # 2 -> moderate
+    monkeypatch.setattr(menu.Confirm, "ask", staticmethod(lambda *a, **k: True))
+
+    await menu.run_test_flow("http://localhost:3000")
+    assert captured["max_risk"] == "moderate"
+    assert menu.RISK_CHOICES == {"1": "low", "2": "moderate", "3": "high"}
+
+
+def test_menu_risk_mapping_is_the_canonical_strings():
+    from cli.menu import RISK_CHOICES
+    assert set(RISK_CHOICES.values()) == {"low", "moderate", "high"}

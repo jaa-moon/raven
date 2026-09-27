@@ -33,6 +33,7 @@ from ui.setup_wizard import run_setup_wizard
 app = typer.Typer(name="raven", help="Raven — Autonomous Security Assessment Platform", no_args_is_help=False)
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_RISK_LEVELS = ("passive", "low", "moderate", "high")
 
 
 @app.callback(invoke_without_command=True)
@@ -46,6 +47,11 @@ def _run_adaptive(target: Optional[str], depth: str, fail_on: str, output: Optio
                   resume: Optional[str] = None, max_risk: str = "low") -> None:
     from core.assessment import run_assessment
     from reporting.generator import save, verdict
+
+    max_risk = (max_risk or "low").lower()
+    if max_risk not in _RISK_LEVELS:
+        console.print(f"[red]Invalid --max-risk '{max_risk}'. Choose one of: {', '.join(_RISK_LEVELS)}.[/]")
+        raise typer.Exit(code=2)
 
     print_banner(console)
     console.print(f"  [bold cyan]Target:[/] {target}  |  [bold cyan]Depth:[/] {depth}  |  "
@@ -122,9 +128,10 @@ def pentest(
     depth: str = typer.Option("standard", "--depth", "-d"),
     fail_on: str = typer.Option("none", "--fail-on"),
     yes: bool = typer.Option(False, "--yes", "-y"),
+    max_risk: str = typer.Option("low", "--max-risk", help="passive|low|moderate|high."),
 ) -> None:
     """Alias for `assess`, kept for backward compatibility."""
-    _run_adaptive(target_path, depth, fail_on, None, yes)
+    _run_adaptive(target_path, depth, fail_on, None, yes, max_risk=max_risk)
 
 
 @app.command("setup")

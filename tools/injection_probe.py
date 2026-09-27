@@ -75,6 +75,25 @@ def _place(url: str, method: str, parameter: str, location: str, value: str) -> 
         return {"url": url, "method": method or "POST", "data": {parameter: value}}
     if location == "header":
         return {"url": url, "method": method, "headers": {parameter: value}}
+    if location == "cookie":
+        return {"url": url, "method": method, "headers": {"Cookie": f"{parameter}={value}"}}
+    if location == "path":
+        # `parameter` is the literal path segment observed during discovery (a
+        # real REST id or a synthetic placeholder substituted for a spec's
+        # `{param}` template) -- never a guess. Only the last exact-match
+        # segment is replaced, so composite multi-id paths still test one
+        # segment per round.
+        from urllib.parse import quote
+        parts = urlsplit(url)
+        segments = parts.path.split("/")
+        for i in range(len(segments) - 1, -1, -1):
+            if segments[i] == parameter:
+                segments[i] = quote(value, safe="")
+                break
+        else:
+            raise ToolError("invalid_args", f"Path segment '{parameter}' not found in {url}.")
+        new_url = urlunsplit((parts.scheme, parts.netloc, "/".join(segments), parts.query, parts.fragment))
+        return {"url": new_url, "method": method, "data": None}
     raise ToolError("invalid_args", f"Unsupported parameter location '{location}'.")
 
 
@@ -105,9 +124,13 @@ async def _fetch(url: str, method: str = "GET", headers: Optional[Dict[str, str]
 
 async def sql_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
                     timeout: float = 10.0) -> Dict[str, Any]:
-    """One controlled round: baseline (benign value) + quote + boolean-true + boolean-false."""
+    """One controlled round: two identical benign baselines (to measure the
+    response's natural jitter) + quote + boolean-true + boolean-false. All
+    payloads are read-only; there are no writes, no stacked/UNION queries and
+    no time-based sleeps."""
     tests: Dict[str, Any] = {}
-    for name, value in {"baseline": BASELINE_VALUE, **SQL_PAYLOADS}.items():
+    plan = {"baseline": BASELINE_VALUE, "baseline2": BASELINE_VALUE, **SQL_PAYLOADS}
+    for name, value in plan.items():
         req = _place(url, method, parameter, location, value)
         try:
             data = await _fetch(timeout=timeout, **req)
@@ -141,12 +164,19 @@ async def xss_probe(url: str, parameter: str, method: str = "GET", location: str
     body = data.get("body", "") or ""
     raw_reflected = payload in body
     marker_reflected = marker in body
-    escaped = marker_reflected and not raw_reflected and (
-        f"&lt;{marker}" in body or f"\\u003c{marker}" in body.lower())
+    # The payload leads with '<' immediately before the marker. If that '<'
+    # survives verbatim right before the marker, an HTML tag can be opened at
+    # the reflection site -- the real "reflection != XSS" test.
+    tag_breakout = f"<{marker}" in body
+    lowered = body.lower()
+    escaped = bool(marker_reflected and not tag_breakout and (
+        f"&lt;{marker.lower()}" in lowered or f"\\u003c{marker.lower()}" in lowered
+        or f"%3c{marker.lower()}" in lowered))
     return {
         "parameter": parameter, "location": location, "token": token, "payload": payload,
         "status_code": data.get("status_code"),
-        "raw_reflected": raw_reflected, "marker_reflected": marker_reflected, "escaped": escaped,
+        "raw_reflected": raw_reflected, "marker_reflected": marker_reflected,
+        "tag_breakout": tag_breakout, "escaped": escaped,
         "context": _reflection_context(body, marker) if marker_reflected else "absent",
         "elapsed_ms": data.get("elapsed_ms"),
     }
@@ -200,7 +230,14 @@ async def ssrf_probe(url: str, parameter: str, method: str = "GET", location: st
     across most real network boundaries for a remote target).
     """
     token = secrets.token_hex(8)
-    server = await _run_canary(token)
+    try:
+        server = await _run_canary(token)
+    except OSError as e:
+        # The loopback listener could not be bound: SSRF cannot be tested this
+        # round. Reported as an unavailable mechanism, never as "not vulnerable".
+        return {"parameter": parameter, "location": location, "token": token,
+                "callback_available": False, "callback_received": False,
+                "application_accepted": None, "detail": f"callback listener unavailable: {e}"}
     port = server.sockets[0].getsockname()[1]
     try:
         callback = _SSRF_CALLBACK_FMT.format(port=port, token=token)
@@ -209,6 +246,7 @@ async def ssrf_probe(url: str, parameter: str, method: str = "GET", location: st
         await asyncio.sleep(settle)
         return {
             "parameter": parameter, "location": location, "callback": callback, "token": token,
+            "callback_available": True,
             "application_status_code": data.get("status_code"),
             "application_accepted": bool(data.get("status_code")) and data["status_code"] < 500,
             "callback_received": bool(server.hits),  # type: ignore[attr-defined]

@@ -20,7 +20,7 @@ from agents.registry import AgentRegistry, default_registry
 from core.budget import BudgetLimits, BudgetManager
 from core.coverage import compute_coverage, overall_state
 from core.runtime import ValidationRuntime, close_unvalidated, execute_task, validate_pending
-from core.scope import Scope, ScopeValidator
+from core.scope import RISK_ORDER, Scope, ScopeValidator
 from core.state import AssessmentState
 from core.target import check_reachability, parse_target
 from intelligence.context import ContextManager
@@ -100,6 +100,12 @@ async def run_assessment(
         await TargetAnalyzer(state, recovery, llm).analyze(reachable_hint=reachable)
     gateway.target_type = state.profile.target_type
     state.profile.attributes["capabilities_available"] = sorted(registry.capabilities())
+    # High risk is selectable, but be honest when nothing in this build needs it.
+    if RISK_ORDER.get(state.scope.max_risk, 0) >= RISK_ORDER["high"] and not any(
+            t.risk_level == "high" for t in registry.all()):
+        state.add_limitation(
+            "Risk level 'high' was selected, but no capabilities requiring 'high' risk are implemented in "
+            "this build; high permits the same controlled active tests (SQL injection/XSS/SSRF) as 'moderate'.")
     p = state.profile
     say("profile", f"{p.target_type}; surfaces={p.surfaces}; technologies={p.technologies}; reachable={p.reachable}")
 
@@ -137,7 +143,8 @@ async def run_assessment(
         state.add_limitation("Assessment stopped early; remaining lower-priority tests were not run "
                              f"(budget: {', '.join(budget.exhausted_dimensions()) or budget.status()}).")
     state.phase = "reporting"
-    state.coverage = compute_coverage(p.target_type, state.tasks)
+    state.coverage = compute_coverage(p.target_type, state.tasks,
+                                      not_assessed_reasons=_injection_not_assessed_reasons(state))
     state.overall_state = overall_state(state.coverage)
     state.budget = budget.snapshot()
     if learn_lessons:
@@ -149,6 +156,26 @@ async def run_assessment(
     state.finished_at = now_iso()
     state.save(state_root)
     return state
+
+
+_INJECTION_SURFACES = ("SQL Injection", "XSS", "SSRF")
+
+
+def _injection_not_assessed_reasons(state: AssessmentState) -> Dict[str, str]:
+    """Explain *why* an active-injection surface was not assessed, so a
+    NOT_ASSESSED is never mistaken for 'not vulnerable'. Only applies when no
+    active-injection task was planned at all; budget/tool-failure cases are
+    already described by the task-status coverage logic."""
+    if RISK_ORDER.get(state.scope.max_risk, 0) < RISK_ORDER["moderate"]:
+        reason = ("Active injection capability blocked by risk policy: the selected risk level is "
+                  f"'{state.scope.max_risk}'. Re-run at --max-risk moderate (or higher), under explicit "
+                  "authorization, to test it. This is not evidence of absence.")
+        return {s: reason for s in _INJECTION_SURFACES}
+    if not state.profile.attributes.get("injection_surface"):
+        reason = ("No eligible input surface (form field, query-string, or REST 'id' parameter) was "
+                  "discovered to test.")
+        return {s: reason for s in _INJECTION_SURFACES}
+    return {}
 
 
 def _prepare_resume(state: AssessmentState) -> None:

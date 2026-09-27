@@ -80,12 +80,18 @@ def compute_coverage(
     target_type: str,
     tasks: List[TestTask],
     unavailable_surfaces: Optional[Dict[str, str]] = None,
+    not_assessed_reasons: Optional[Dict[str, str]] = None,
 ) -> List[CoverageItem]:
     """
     unavailable_surfaces: surface -> reason for surfaces that were applicable but
-    could not be tested for a *known external* reason (e.g. missing binary).
+    could not be tested for a *known external* reason (e.g. missing binary);
+    these become BLOCKED.
+    not_assessed_reasons: surface -> explicit reason a surface that had no planned
+    task is NOT_ASSESSED (e.g. blocked by risk policy, or no eligible input
+    surface discovered) instead of the generic "no test was planned".
     """
     unavailable_surfaces = unavailable_surfaces or {}
+    not_assessed_reasons = not_assessed_reasons or {}
     out: List[CoverageItem] = []
     for spec in SURFACES:
         if target_type not in spec.applies_to:
@@ -106,8 +112,11 @@ def compute_coverage(
         if not spec.implemented:
             status, detail = CoverageStatus.NOT_ASSESSED, spec.note
         elif not mine:
-            status = CoverageStatus.BLOCKED if spec.name in unavailable_surfaces else CoverageStatus.NOT_ASSESSED
-            detail = unavailable_surfaces.get(spec.name, "No test was planned for this surface.")
+            if spec.name in unavailable_surfaces:
+                status, detail = CoverageStatus.BLOCKED, unavailable_surfaces[spec.name]
+            else:
+                status = CoverageStatus.NOT_ASSESSED
+                detail = not_assessed_reasons.get(spec.name, "No test was planned for this surface.")
         elif done and not (failed or blocked or skipped or pending):
             status, detail = CoverageStatus.ASSESSED, f"{len(done)} test(s) completed."
         elif done:
