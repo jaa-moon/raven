@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from core.models import (
     AgentActivity, CoverageItem, Finding, FindingStatus, InjectionHypothesis, Observation,
@@ -22,6 +22,12 @@ from core.models import (
 from core.profile import TargetProfile
 from core.scope import Scope
 from core.target import TargetInput
+
+
+class StateLoadError(Exception):
+    """Raised when a saved assessment's state.json exists but cannot be loaded: it is not
+    valid JSON, or its content does not match the current AssessmentState schema. Distinct
+    from FileNotFoundError, which means no state.json exists at all for that assessment_id."""
 
 
 def default_state_root() -> Path:
@@ -126,7 +132,16 @@ class AssessmentState(BaseModel):
         path = (root or default_state_root()) / assessment_id / "state.json"
         if not path.exists():
             raise FileNotFoundError(f"No saved assessment: {assessment_id}")
-        return cls.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise StateLoadError(f"Saved assessment '{assessment_id}' is corrupt (invalid JSON in "
+                                 f"{path}): {e}") from e
+        try:
+            return cls.model_validate(raw)
+        except ValidationError as e:
+            raise StateLoadError(f"Saved assessment '{assessment_id}' cannot be loaded — its "
+                                 f"state.json does not match the current schema ({path}): {e}") from e
 
     @classmethod
     def list_ids(cls, root: Optional[Path] = None) -> List[str]:

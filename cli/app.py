@@ -26,6 +26,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") not in (
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from config.manager import ConfigManager
+from core.state import StateLoadError
+from core.target import TargetError
 from ui.banner import print_banner
 from ui.console import console
 from ui.setup_wizard import run_setup_wizard
@@ -71,9 +73,13 @@ def _run_adaptive(target: Optional[str], depth: str, fail_on: str, output: Optio
     def emit(kind: str, msg: str) -> None:
         console.print(f"[dim]{kind:12}[/] {msg}")
 
-    with console.status(f"[bold green]Running Raven adaptive assessment on {target}...[/]"):
-        state = asyncio.run(run_assessment(target, resume_id=resume, depth=depth, max_risk=max_risk,
-                                           llm_config=cfg, emit=emit, authorized=True))
+    try:
+        with console.status(f"[bold green]Running Raven adaptive assessment on {target}...[/]"):
+            state = asyncio.run(run_assessment(target, resume_id=resume, depth=depth, max_risk=max_risk,
+                                               llm_config=cfg, emit=emit, authorized=True))
+    except (StateLoadError, TargetError, PermissionError, ValueError) as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(code=1)
 
     md_path, json_path = save(state, Path(output) if output else Path("raven_reports"))
     console.print(f"\n[bold green]+ Assessment complete![/]  ID: [cyan]{state.assessment_id}[/]")

@@ -47,6 +47,24 @@ def test_invalid_target_is_reported_cleanly():
     assert r.exit_code != 0
 
 
+def test_resume_with_corrupt_state_is_reported_cleanly(tmp_path, monkeypatch):
+    asm_dir = tmp_path / "assessments" / "ASM-corrupt"
+    asm_dir.mkdir(parents=True)
+    (asm_dir / "state.json").write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setenv("RAVEN_HOME", str(tmp_path))
+    r = runner.invoke(app, ["assess", "--resume", "ASM-corrupt", "-y"])
+    assert r.exit_code == 1
+    # This typer app's CliRunner always surfaces its own typer.Exit as SystemExit in
+    # r.exception (confirmed empirically, including for already-passing tests), so "no
+    # exception at all" isn't a meaningful signal here. What *does* distinguish a clean
+    # catch from an escaped traceback is that the raw StateLoadError itself must not be
+    # what propagated out.
+    from core.state import StateLoadError
+    assert not isinstance(r.exception, StateLoadError)
+    assert "traceback" not in r.output.lower()
+    assert "corrupt" in r.output.lower() or "cannot be loaded" in r.output.lower()
+
+
 def test_report_command_missing_id():
     assert runner.invoke(app, ["report", "ASM-nope"]).exit_code == 1
 

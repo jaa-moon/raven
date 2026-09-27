@@ -95,6 +95,25 @@ def test_loading_a_missing_assessment_raises(tmp_path):
         AssessmentState.load("ASM-none", tmp_path)
 
 
+def test_loading_a_corrupt_state_file_raises_state_load_error(tmp_path):
+    from core.state import StateLoadError
+    d = tmp_path / "ASM-corrupt"
+    d.mkdir()
+    (d / "state.json").write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(StateLoadError):
+        AssessmentState.load("ASM-corrupt", tmp_path)
+
+
+def test_loading_a_schema_incompatible_state_file_raises_state_load_error(tmp_path):
+    from core.state import StateLoadError
+    d = tmp_path / "ASM-badschema"
+    d.mkdir()
+    # valid JSON, but "tasks" must be a list — a string is a type Pydantic v2 cannot coerce
+    (d / "state.json").write_text('{"tasks": "not-a-list"}', encoding="utf-8")
+    with pytest.raises(StateLoadError):
+        AssessmentState.load("ASM-badschema", tmp_path)
+
+
 # ── contextual RAG ────────────────────────────────────────────────────────────────
 
 def test_retrieval_is_driven_by_context(tmp_path):
