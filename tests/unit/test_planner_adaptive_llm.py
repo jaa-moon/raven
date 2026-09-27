@@ -133,6 +133,29 @@ async def test_budget_pressure_drops_low_priority_tasks_before_exhaustion(tmp_pa
     assert pl.next_task(state).title == "task 0"
 
 
+async def test_exhausted_expensive_ops_does_not_floor_unrelated_cheap_tasks(tmp_path):
+    """Regression for the planner-side half of the budget-dimension-conflation bug:
+    apply_budget_policy()/replan() must not drop ordinary pending tasks just because the
+    narrow expensive_ops dimension is maxed, while tool-call/time/iteration budget is
+    untouched. (The gateway still independently refuses to actually run an expensive-
+    flagged tool once expensive_ops is exhausted -- that path is unchanged here.)"""
+    class Many(Agent):
+        name, capabilities = "many", ["scan"]
+        def applies(self, p): return True
+        def propose_tasks(self, s):
+            return [self.task(f"t{i}", "scan", "HTTP", f"task {i}", priority=p, cost=1)
+                    for i, p in enumerate([95, 80, 70, 50, 30])]
+        async def run(self, t, c): return AgentResult()
+
+    b = BudgetManager(BudgetLimits(max_tool_calls=100, max_expensive_ops=1))
+    state, pl = _planner(b, agents=_registry(Many()), tmp=tmp_path)
+    b.consume(expensive=1)                                        # expensive_ops "exhausted"; everything else untouched
+    await pl.replan(state, "test")
+    status = {t.title: t.status for t in state.tasks}
+    assert all(s == "pending" for s in status.values()), status    # none skipped -- budget.status() is still "ok"
+    assert not state.limitations
+
+
 class FakeProvider:
     provider_name, model_name = "Fake", "m"
     def __init__(self, reply): self.reply, self.calls = reply, 0

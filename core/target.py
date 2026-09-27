@@ -85,6 +85,16 @@ def parse_target(raw: str) -> TargetInput:
     if text.startswith((".", "/", "~")) or re.match(r"^[A-Za-z]:[\\/]", text):
         raise TargetError(f"Path does not exist: {text}")
 
+    # 2b. A URL-shaped scheme Raven doesn't support (anything but http/https) -- reject with
+    # a clear reason here, before it can fall into the bare host:port branch below and produce
+    # a misleading "invalid port" error (e.g. "nonexistent://bad-target" splits on its single
+    # ':' into host="nonexistent", port="//bad-target").
+    scheme_match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", text)
+    if scheme_match:
+        raise TargetError(
+            f"Unsupported URL scheme '{scheme_match.group(1)}' — only http:// and https:// "
+            f"are supported: {text}")
+
     # 3. IP (optionally with :port)
     host_part, port = text, None
     if text.count(":") == 1 and not text.startswith("["):

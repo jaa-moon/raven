@@ -82,7 +82,17 @@ class BudgetManager:
         }
 
     def used_fraction(self) -> float:
-        return max(self.fractions().values())
+        """Drives status()/BUDGET_FLOOR, i.e. "should the planner slow down or stop
+        entirely?" Deliberately excludes expensive_ops and llm_calls: those are narrow,
+        per-capability throttles (e.g. "at most 6 higher-risk active probes"), already
+        enforced independently and correctly at call time via can_afford(expensive=...)
+        / can_afford(llm=...) in the gateway. Folding them into the global signal would
+        mean a handful of SQLi/SSRF probes (max_expensive_ops defaults to just 6) halts
+        *all* remaining work — including cheap, unrelated tasks — while tool-call and
+        time budget sit mostly unused. tool_calls/seconds/iterations are the genuinely
+        global "how much runway is left" dimensions every task consumes."""
+        f = self.fractions()
+        return max(f["tool_calls"], f["seconds"], f["iterations"])
 
     def status(self) -> str:
         f = self.used_fraction()

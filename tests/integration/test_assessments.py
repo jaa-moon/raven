@@ -44,6 +44,38 @@ async def test_leaky_target_confirms_real_env_and_ignores_protected_git(leaky_se
     assert cors and cors[0].confidence.value in ("medium", "high")
 
 
+async def test_admin_actuator_and_config_exposures_are_confirmed_and_siblings_are_not(admin_leaky_server):
+    """End-to-end: agent -> gateway -> validation/content.py -> independent revalidator -> report,
+    for the three content-validated categories that previously had no fixture-server coverage."""
+    from core.assessment import run_assessment
+    state = await run_assessment(admin_leaky_server.url, **FAST)
+
+    admin = next(f for f in state.confirmed_findings if f.category == "AdminPanelExposed")
+    assert admin.signal.get("path") == "/admin" and admin.severity.value == "high"
+    assert admin.evidence or admin.validation_notes
+
+    actuator = next(f for f in state.confirmed_findings if f.category == "ActuatorExposure")
+    assert actuator.signal.get("path") == "/actuator/health" and actuator.severity.value == "high"
+    assert actuator.evidence or actuator.validation_notes
+
+    config = next(f for f in state.confirmed_findings if f.category == "SensitiveFileExposure"
+                  and f.signal.get("path") == "/wp-config.php")
+    assert config.severity.value == "critical"
+    assert config.evidence or config.validation_notes
+
+    # Sibling paths in the same probe groups genuinely 404 -- they must not be confirmed too.
+    paths = _paths(state)
+    for missing in ("/actuator", "/actuator/env", "/console", "/administrator", "/wp-admin",
+                    "/config.php", "/configuration.php"):
+        assert paths[missing]["classification"] == "generic_404", missing
+    confirmed_paths = {f.signal.get("path") for f in state.confirmed_findings
+                       if f.signal.get("validator") == "http_path_exposure"}
+    assert confirmed_paths == {"/admin", "/actuator/health", "/wp-config.php"}
+
+    cov = {c.surface: c for c in state.coverage}
+    assert cov["Exposed paths & files"].status == CoverageStatus.ASSESSED
+
+
 async def test_web_assessment_adapts_to_what_it_discovers(spa_server):
     """robots.txt + JS bundle reveal endpoints -> profile changes -> new tasks -> API surface found."""
     from core.assessment import run_assessment

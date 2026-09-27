@@ -112,6 +112,29 @@ def leaky_server():
     s.close()
 
 
+def _admin_leaky_routes(path: str, headers: Dict[str, str]) -> Route:
+    """A server with genuine admin-panel, actuator, and config-file exposures at
+    one path per group, and 404s for every sibling path in the same probe group --
+    proves confirmation is evidence-based, not merely 'the path name looks sensitive'."""
+    p = path.split("?")[0]
+    if p == "/":
+        return 200, {"content-type": "text/html"}, "<html><title>Corp Portal</title><body>Welcome</body></html>"
+    if p == "/admin":
+        return 200, {"content-type": "text/html"}, "<html><title>Admin Login</title><body><h1>Admin Panel Login</h1></body></html>"
+    if p == "/actuator/health":
+        return 200, {"content-type": "application/json"}, '{"status":"UP","components":{"db":{"status":"UP"}}}'
+    if p == "/wp-config.php":
+        return 200, {"content-type": "text/plain"}, "<?php\ndefine('DB_NAME', 'prod');\ndefine('DB_USER', 'root');\n"
+    return 404, {"content-type": "text/html"}, "Not Found"
+
+
+@pytest.fixture
+def admin_leaky_server():
+    s = _Server(_admin_leaky_routes)
+    yield s
+    s.close()
+
+
 def _vulnerable_routes(path: str, headers: Dict[str, str]) -> Route:
     """A deliberately, safely vulnerable fixture: a fake (in-memory, read-only) SQL search,
     a reflected-XSS item page, and an SSRF-prone fetch parameter -- all synthetic, no real DB."""

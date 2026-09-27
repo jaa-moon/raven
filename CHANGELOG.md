@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased - Release stabilization: budget-conflation fix, test coverage gaps closed
+
+### Fixed
+- **Budget-dimension conflation could silently skip unrelated test coverage.**
+  `BudgetManager.used_fraction()` took the max across all five independent budget dimensions
+  (tool_calls, seconds, iterations, llm_calls, expensive_ops). Because `max_expensive_ops`
+  defaults to 6 and both SQLi and SSRF probes are flagged `expensive`, a handful of injection
+  tests could exhaust that one narrow dimension and, via `BUDGET_FLOOR["exhausted"] = 101`,
+  cause the planner to skip *all* remaining pending tasks — including cheap, unrelated ones —
+  even with most of the tool-call and time budget still unused. `used_fraction()` now only
+  considers tool_calls/seconds/iterations, the genuinely global "runway" dimensions;
+  expensive_ops/llm_calls remain correctly enforced per-call via
+  `can_afford(expensive=...)`/`can_afford(llm=...)` in the gateway, unchanged.
+- **Misleading CLI error for an unsupported URL scheme.** `raven assess "nonexistent://x"`
+  reported "Invalid port in target" (it fell through to the bare `host:port` parser). Now
+  reports "Unsupported URL scheme 'nonexistent' — only http:// and https:// are supported."
+  Still exits cleanly with code 1 in both cases.
+
+### Added (test coverage, no behavior change)
+- End-to-end fixture-server coverage for admin-panel/actuator/config-file exposure confirmation
+  (previously only unit-tested directly against the `validation/content.py` functions, never
+  through the full agent → gateway → validator → independent-revalidation → report pipeline).
+- Unit tests for `tools/permission_scanner.py` (previously zero coverage): SUID and
+  world-writable detection via a mocked `Path.stat()`, plus a negative/no-false-positives case.
+
+### Investigated, deferred (no code change)
+- **GraphQL variable discovery.** Confirmed this needs a larger introspection query (current one
+  only requests type names, never `args`/`fields`) and a new request-placement mode in
+  `tools/injection_probe.py` (existing modes can't express GraphQL's JSON `query`+`variables`
+  envelope) — a multi-part feature, not a short wiring change. Left for a future milestone.
+
 ## Unreleased - Input Surface Discovery v2 and evidence-aware active-testing prioritization
 
 Addresses the two gaps identified after the first live active-injection run: discovery was narrowly

@@ -34,6 +34,16 @@ def test_invalid_targets_are_rejected(bad):
         parse_target(bad)
 
 
+def test_unsupported_url_scheme_gives_a_clear_reason_not_a_misleading_port_error():
+    """A URL-shaped target with an unsupported scheme must not fall through to the bare
+    host:port branch, which used to split "nonexistent://bad-target" on its single ':'
+    into host="nonexistent", port="//bad-target" and report a confusing "Invalid port"."""
+    with pytest.raises(TargetError, match="[Uu]nsupported URL scheme 'nonexistent'"):
+        parse_target("nonexistent://bad-target")
+    with pytest.raises(TargetError, match="[Uu]nsupported URL scheme 'ftp'"):
+        parse_target("ftp://x")
+
+
 # ── scope ─────────────────────────────────────────────────────────────────────
 
 def _v(target, risk="low"):
@@ -92,6 +102,22 @@ def test_time_and_expensive_and_llm_budgets():
     assert not b.can_afford(expensive=True) and not b.can_afford(llm=True) and b.can_afford()
     t[0] = 10.0
     assert not b.can_afford() and b.status() == "exhausted"
+
+
+def test_status_ignores_exhausted_expensive_ops_and_llm_calls():
+    """expensive_ops/llm_calls are narrow per-capability throttles, not global "out of
+    runway" signals -- status() (which gates ALL pending tasks via BUDGET_FLOOR) must not
+    report "exhausted" just because one of those two maxed out while tool_calls/seconds/
+    iterations still have plenty of headroom. can_afford() still correctly blocks the
+    specific resource per call, independent of this."""
+    b = BudgetManager(BudgetLimits(max_tool_calls=100, max_expensive_ops=1, max_llm_calls=1))
+    b.consume(expensive=1, llm_calls=1)
+    assert b.status() == "ok"
+    assert set(b.exhausted_dimensions()) == {"expensive_ops", "llm_calls"}   # still visible for reporting
+    assert not b.can_afford(expensive=True) and not b.can_afford(llm=True)  # still blocked per-call
+    assert b.can_afford()                                                    # ordinary tasks unaffected
+    b.consume(tool_calls=100)
+    assert b.status() == "exhausted"                                        # a genuinely global dimension still gates
 
 
 def test_retry_accounting_and_depth_presets():
