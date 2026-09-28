@@ -21,6 +21,10 @@ MAIN_JS = 'const a="/api/Items"; const b="/rest/basket"; export {a,b};'
 # which a dict cannot represent.
 Headers = Union[Dict[str, str], Iterable[Tuple[str, str]]]
 Route = Tuple[int, Headers, str]
+# path, headers, and the raw request body (only non-empty for a POST/PUT/etc
+# with a Content-Length -- needed for the GraphQL fixture, which must read a
+# JSON `{"query": ..., "variables": ...}` body to decide its response).
+RouteFn = Callable[[str, Dict[str, str], str], Route]
 
 
 @pytest.fixture(autouse=True)
@@ -31,13 +35,15 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 class _Server:
-    def __init__(self, routes: Callable[[str, Dict[str, str]], Route]) -> None:
+    def __init__(self, routes: RouteFn) -> None:
         outer = routes
 
         class H(BaseHTTPRequestHandler):
-            def do_GET(self):  # noqa: N802
-                status, headers, body = outer(self.path, dict(self.headers))
-                data = body.encode()
+            def _handle(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode("utf-8", errors="ignore") if length else ""
+                status, headers, resp_body = outer(self.path, dict(self.headers), body)
+                data = resp_body.encode()
                 self.send_response(status)
                 items = headers.items() if isinstance(headers, dict) else headers
                 for k, v in items:
@@ -46,11 +52,14 @@ class _Server:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def do_GET(self):  # noqa: N802
+                self._handle()
+
             do_HEAD = do_GET  # noqa: N815
             # Route POST through the same handler: every fixture route function only
-            # inspects path/query and ignores method, and leaving POST undefined makes
-            # BaseHTTPRequestHandler's default 501 handling method-dependent in ways
-            # that are not deterministic across requests (breaking response-jitter
+            # inspects path/query/body and ignores method, and leaving POST undefined
+            # makes BaseHTTPRequestHandler's default 501 handling method-dependent in
+            # ways that are not deterministic across requests (breaking response-jitter
             # comparisons for body-location injection probes).
             do_POST = do_GET  # noqa: N815
 
@@ -71,7 +80,7 @@ class _Server:
         self.httpd.server_close()
 
 
-def _spa_routes(path: str, headers: Dict[str, str]) -> Route:
+def _spa_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
     """Juice-Shop-style: every unknown route returns the SPA shell with HTTP 200."""
     p = path.split("?")[0]
     html = {"content-type": "text/html; charset=utf-8"}
@@ -86,7 +95,7 @@ def _spa_routes(path: str, headers: Dict[str, str]) -> Route:
     return 200, html, SPA_SHELL
 
 
-def _leaky_routes(path: str, headers: Dict[str, str]) -> Route:
+def _leaky_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
     """A conventional server with a genuinely exposed .env and permissive CORS."""
     p = path.split("?")[0]
     if p == "/":
@@ -112,7 +121,7 @@ def leaky_server():
     s.close()
 
 
-def _admin_leaky_routes(path: str, headers: Dict[str, str]) -> Route:
+def _admin_leaky_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
     """A server with genuine admin-panel, actuator, and config-file exposures at
     one path per group, and 404s for every sibling path in the same probe group --
     proves confirmation is evidence-based, not merely 'the path name looks sensitive'."""
@@ -135,7 +144,7 @@ def admin_leaky_server():
     s.close()
 
 
-def _vulnerable_routes(path: str, headers: Dict[str, str]) -> Route:
+def _vulnerable_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
     """A deliberately, safely vulnerable fixture: a fake (in-memory, read-only) SQL search,
     a reflected-XSS item page, and an SSRF-prone fetch parameter -- all synthetic, no real DB."""
     import urllib.parse
@@ -226,5 +235,161 @@ def _vulnerable_routes(path: str, headers: Dict[str, str]) -> Route:
 @pytest.fixture
 def vulnerable_server():
     s = _Server(_vulnerable_routes)
+    yield s
+    s.close()
+
+
+# ── GraphQL fixtures ─────────────────────────────────────────────────────────
+#
+# Three variants of the same schema, exercising discovery + active testing
+# end to end: a working server with introspection enabled (one genuinely
+# SQLi-vulnerable field, one that never varies with input, a list argument
+# that must never be injected into, and a mutation with a nested multi-scalar
+# input object that discovery must find but never actively test), a server
+# with introspection disabled, and a server whose full introspection response
+# is deliberately incomplete.
+
+def _graphql_extract(path: str, body: str) -> Tuple[str, Dict[str, object]]:
+    """Read the GraphQL `query` (+ optional `variables`) from either a GET
+    query-string (introspection, matching `agents/web_recon.py::_graphql`) or
+    a POST JSON body (operation execution, matching
+    `tools/injection_probe.py::_place`, location="graphql")."""
+    import urllib.parse
+
+    _, _, qs = path.partition("?")
+    if qs:
+        qparams = dict(urllib.parse.parse_qsl(qs))
+        if "query" in qparams:
+            return qparams.get("query", ""), {}
+    if body:
+        try:
+            payload = json.loads(body)
+        except (ValueError, TypeError):
+            return "", {}
+        if isinstance(payload, dict):
+            return str(payload.get("query", "") or ""), (payload.get("variables") or {})
+    return "", {}
+
+
+_GRAPHQL_SCHEMA_TYPES = [
+    {"kind": "OBJECT", "name": "Query", "inputFields": None, "fields": [
+        {"name": "userById", "type": {"kind": "OBJECT", "name": "User", "ofType": None}, "args": [
+            {"name": "id", "type": {"kind": "NON_NULL", "name": None,
+                                    "ofType": {"kind": "SCALAR", "name": "ID", "ofType": None}}},
+            # Optional list argument: must never be selected for injection.
+            {"name": "tags", "type": {"kind": "LIST", "name": None,
+                                      "ofType": {"kind": "NON_NULL", "name": None,
+                                                "ofType": {"kind": "SCALAR", "name": "String", "ofType": None}}}},
+        ]},
+        {"name": "safeById", "type": {"kind": "OBJECT", "name": "User", "ofType": None}, "args": [
+            {"name": "id", "type": {"kind": "NON_NULL", "name": None,
+                                    "ofType": {"kind": "SCALAR", "name": "ID", "ofType": None}}},
+            # A URL-like optional scalar arg: proves SSRF hypotheses get proposed for GraphQL too.
+            {"name": "webhookUrl", "type": {"kind": "SCALAR", "name": "String", "ofType": None}},
+        ]},
+    ]},
+    {"kind": "OBJECT", "name": "Mutation", "inputFields": None, "fields": [
+        {"name": "createUser", "type": {"kind": "OBJECT", "name": "User", "ofType": None}, "args": [
+            {"name": "input", "type": {"kind": "NON_NULL", "name": None,
+                                       "ofType": {"kind": "INPUT_OBJECT", "name": "CreateUserInput",
+                                                 "ofType": None}}},
+        ]},
+    ]},
+    {"kind": "INPUT_OBJECT", "name": "CreateUserInput", "fields": None, "inputFields": [
+        {"name": "name", "type": {"kind": "NON_NULL", "name": None,
+                                  "ofType": {"kind": "SCALAR", "name": "String", "ofType": None}}},
+        {"name": "age", "type": {"kind": "NON_NULL", "name": None,
+                                 "ofType": {"kind": "SCALAR", "name": "Int", "ofType": None}}},
+        {"name": "active", "type": {"kind": "NON_NULL", "name": None,
+                                    "ofType": {"kind": "SCALAR", "name": "Boolean", "ofType": None}}},
+    ]},
+    {"kind": "OBJECT", "name": "User", "inputFields": None, "fields": [
+        {"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}, "args": []},
+    ]},
+]
+
+_GRAPHQL_FULL_SCHEMA_RESPONSE = json.dumps({"data": {"__schema": {
+    "queryType": {"name": "Query"}, "mutationType": {"name": "Mutation"}, "types": _GRAPHQL_SCHEMA_TYPES,
+}}})
+_GRAPHQL_SIMPLE_SCHEMA_RESPONSE = json.dumps({"data": {"__schema": {"types": [{"name": "Query"}]}}})
+_GRAPHQL_NO_SCHEMA_RESPONSE = json.dumps({"errors": [{"message": "introspection is disabled"}]})
+
+
+def _graphql_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
+    json_ct = {"content-type": "application/json"}
+    p = path.split("?")[0]
+    if p != "/graphql":
+        return 404, json_ct, "Not Found"
+    query, variables = _graphql_extract(path, body)
+
+    if "__schema" in query:
+        if "inputFields" in query:                        # the full introspection query
+            return 200, json_ct, _GRAPHQL_FULL_SCHEMA_RESPONSE
+        return 200, json_ct, _GRAPHQL_SIMPLE_SCHEMA_RESPONSE   # the cheap passive-check query
+
+    if "userById" in query:
+        # Fake, in-memory, SQLi-vulnerable lookup -- same true/false/error
+        # pattern as `_vulnerable_routes`'s real `/search` fixture, adapted to
+        # GraphQL's JSON envelope (HTTP 200 even for the resolver "error").
+        uid = str(variables.get("id", ""))
+        if "'" in uid and "OR '1'='1'" not in uid and "AND '1'='2'" not in uid:
+            return 200, json_ct, json.dumps(
+                {"errors": [{"message": f"you have an error in your sql syntax near '{uid}'"}]})
+        if "AND '1'='2'" in uid:
+            return 200, json_ct, json.dumps({"data": {"userById": None}})
+        return 200, json_ct, json.dumps({"data": {"userById": {"id": "raven1", "__typename": "User"}}})
+    if "safeById" in query:
+        # Never varies with input: proves "no signal" is reported honestly.
+        return 200, json_ct, json.dumps({"data": {"safeById": {"id": "1", "__typename": "User"}}})
+    if "createUser" in query:
+        return 200, json_ct, json.dumps({"data": {"createUser": {"id": "99", "__typename": "User"}}})
+    return 200, json_ct, json.dumps({"errors": [{"message": "Unknown operation"}]})
+
+
+def _graphql_no_introspection_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
+    """Same endpoint, but introspection is rejected for every query (never
+    contains the '__schema' text): proves Raven records a clean limitation
+    instead of fabricating a GraphQL input surface."""
+    json_ct = {"content-type": "application/json"}
+    p = path.split("?")[0]
+    if p != "/graphql":
+        return 404, json_ct, "Not Found"
+    return 200, json_ct, _GRAPHQL_NO_SCHEMA_RESPONSE
+
+
+def _graphql_malformed_routes(path: str, headers: Dict[str, str], body: str = "") -> Route:
+    """The cheap passive check still sees '__schema' (introspection looks
+    enabled), but the full introspection response is deliberately incomplete
+    -- missing 'types' entirely -- proving graceful degradation: no crash, no
+    fabricated operation."""
+    json_ct = {"content-type": "application/json"}
+    p = path.split("?")[0]
+    if p != "/graphql":
+        return 404, json_ct, "Not Found"
+    query, _ = _graphql_extract(path, body)
+    if "__schema" in query:
+        if "inputFields" in query:
+            return 200, json_ct, json.dumps({"data": {"__schema": {"queryType": {"name": "Query"}}}})
+        return 200, json_ct, _GRAPHQL_SIMPLE_SCHEMA_RESPONSE
+    return 200, json_ct, json.dumps({"errors": [{"message": "no schema"}]})
+
+
+@pytest.fixture
+def graphql_server():
+    s = _Server(_graphql_routes)
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def graphql_no_introspection_server():
+    s = _Server(_graphql_no_introspection_routes)
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def graphql_malformed_server():
+    s = _Server(_graphql_malformed_routes)
     yield s
     s.close()

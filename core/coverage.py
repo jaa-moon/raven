@@ -64,6 +64,14 @@ SURFACES: List[SurfaceSpec] = [
     SurfaceSpec(name="Dependencies", applies_to=SRC),
     SurfaceSpec(name="Configuration", applies_to=SRC),
     SurfaceSpec(name="File permissions", applies_to=SRC + BIN),
+    SurfaceSpec(
+        name="Binary analysis", applies_to=BIN,
+        note="Static analysis only: format/architecture identification, header-level hardening indicators "
+             "(ELF NX-stack/RELRO-proxy/PIE-proxy; PE ASLR/DEP), ELF DT_NEEDED library enumeration, and "
+             "embedded-string inspection. PE import-table parsing and Mach-O load-command parsing (hardening, "
+             "imports) are not implemented; unsupported facets are reported per-binary, never assumed to be "
+             "free of issues.",
+    ),
     SurfaceSpec(name="Process & CLI", applies_to=BIN),
 ]
 

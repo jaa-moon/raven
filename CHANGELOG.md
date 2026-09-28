@@ -1,5 +1,119 @@
 # Changelog
 
+## Unreleased - GraphQL input discovery v1 (query arguments, SQLi + SSRF)
+
+Implements the GraphQL variable discovery previously investigated and deferred (see "Investigated,
+deferred" below). Rides the existing active-injection pipeline unchanged: same gateway (scope/budget/
+timeout), same evidence-aware `injection_surface`/`propose_tasks`/`_test` flow, same independent
+re-validation in `validation/checks_injection.py`. No change to `raven_mcp/gateway.py`, `core/scope.py`,
+`core/budget.py`, or `recovery/controller.py`.
+
+### Added
+- **Full-schema GraphQL introspection** (`agents/web_recon.py::_graphql_schema`, run automatically after
+  the existing passive introspection check succeeds): a bounded-depth (4-level `ofType` unwrap) query
+  fetching `queryType`/`mutationType` fields, each field's `args`, and every `INPUT_OBJECT` type's
+  `inputFields` — previously the introspection query only ever requested type *names*.
+- **`core/graphql_schema.py::parse_introspection`** (new, pure, unit-tested module): turns a raw
+  introspection response into a bounded list of testable operations — for each query/mutation field, its
+  top-level argument types, a safe baseline value for every argument (recursing into nested `INPUT_OBJECT`
+  fields), and the dotted variable-path of every testable **scalar** leaf (`String`/`Int`/`Float`/`Boolean`/
+  `ID`, top-level or nested). A `LIST`/`OBJECT`/`INTERFACE`/`UNION`/`ENUM`-typed argument is never treated as
+  injectable; if it's required, the whole field is skipped (recorded as a limitation) rather than guessed
+  at. Never raises on missing/incomplete/malformed introspection data — degrades to fewer operations.
+- **`tools/injection_probe.py`**: `_place()` gained a `location="graphql"` mode that builds
+  `{"query": "<document with variable declarations>", "variables": {...}}` (via new `_graphql_document`/
+  `_set_graphql_variable` helpers) and POSTs it as `json=` (not form-encoded, unlike every other location);
+  `_fetch()` gained a `json_body` parameter. `sql_probe`/`ssrf_probe` gained optional `operation_type`/
+  `field`/`top_level_args`/`baseline_variables` kwargs, threaded through unchanged for every REST location.
+  `xss_probe` and its tool schema were deliberately left untouched (see "Deferred" below).
+- **`agents/injection.py`**: discovered GraphQL query-argument leaves are folded into the *same*
+  `injection_surface` dict REST/HTML discovery populates (`location="graphql"`, `evidence="spec"`), via a
+  new idempotent `_merge_graphql_operations`, called every planning pass so it works regardless of whether
+  GraphQL introspection or this agent's own HTML-based discovery finishes first. `propose_tasks`/`_test`
+  thread the extra GraphQL context through `task.params` into the capability call; SSRF hypotheses are now
+  also proposed for a URL-like-named GraphQL scalar argument, using the identical loopback-callback
+  mechanism (no new payload class).
+- **`validation/checks_injection.py`**: `_v_sql_injection`/`_v_ssrf` now carry the same GraphQL context
+  (`operation_type`/`field`/`top_level_args`/`baseline_variables`) from the candidate's `signal` into their
+  own independent re-probe call, so a real GraphQL finding can reach `CONFIRMED` through the same two-
+  independent-re-run repeatability requirement as REST — without this, `_place()` would have nothing to
+  rebuild the GraphQL request from and every re-test would fail uniformly.
+- **Tests**: 11 new unit tests for `core/graphql_schema.py` (correct discovery, list/enum/custom-scalar
+  exclusion, nested multi-scalar input objects, malformed/incomplete-schema degradation), 4 new unit tests
+  for the new `_place()`/`sql_probe` GraphQL request-building, and 10 new integration tests in
+  `tests/integration/test_graphql_injection.py` against three new fixture-server variants in
+  `tests/conftest.py` (introspection enabled with one genuinely vulnerable and one non-vulnerable field,
+  introspection disabled, and malformed/incomplete introspection) — proving correct field/arg discovery with
+  correct evidence tags, list-argument exclusion, mutation arguments discovered but never tested, a real
+  SQLi signal reaching `CONFIRMED` via the same independent-revalidation path as REST, and both degraded
+  cases producing an honest limitation with no crash and no fabricated surface. `tests/conftest.py`'s
+  `_Server` now also reads the request body (needed for GraphQL's JSON POST envelope); all four existing
+  route functions gained a `body` parameter (unused, backward compatible).
+
+### Deferred (documented, not silently missing)
+- **GraphQL mutation-argument testing.** Discovery parses mutation fields too (proven directly: a unit test
+  finds all three nested scalar leaves of a `createUser(input: CreateUserInput!)`-shaped mutation), but
+  `InjectionTestAgent` only folds `query` operations into `injection_surface`. Mutations write data, and
+  building a confidently-safe, always-valid baseline for an arbitrary mutation's entire argument set (not
+  just the variable under test) without a live target to validate against was judged too large a scope to
+  rush into this milestone. The parsed mutation schema is retained
+  (`profile.attributes["graphql_operations"]`) for a future round.
+- **GraphQL XSS.** A GraphQL response is JSON, returned HTTP 200 even for a resolver error, and a reflected
+  payload inside a JSON string is JSON-escaped, not HTML-escaped. The existing reflected-XSS heuristic
+  (`core/injection_signals.py::xss_signals`, shared unchanged with REST/HTML — untouched by this round) partly
+  decides "executable" by checking whether an injected `<` survives raw immediately before the marker, which
+  it would in a JSON body (JSON escapes `"`/`\`/control characters, never `<`) — misclassifying an inert
+  JSON-context reflection as executable HTML/JS. Rather than weaken or special-case that shared heuristic
+  (used identically by independent validation) under time pressure, GraphQL XSS is scoped out entirely:
+  no `injection.xss.reflect` task is ever emitted for a `location="graphql"` parameter.
+
+## Unreleased - Binary Assessment Agent v1 (static only)
+
+New capability where none existed: Raven could already classify a target as `binary` (ELF/PE/Mach-O
+magic-byte detection in `tools/inventory.py::file_classify`) but had no agent for it — every binary target
+reported `NOT_ASSESSED` across the board. Implemented independently in parallel with the GraphQL work
+above; zero file overlap between the two (confirmed via `git diff --stat`), full suite green with both
+present together.
+
+### Added
+- **`tools/binary_scanner.py`** (new, hand-rolled with `struct`, no new dependency): format/architecture
+  identification (ELF class/endianness/`e_type`/`e_machine`; PE DOS→COFF `Machine` field; Mach-O
+  header-level only), header-level hardening indicators (ELF NX-stack/RELRO-proxy/PIE-proxy; PE ASLR/DEP),
+  ELF `DT_NEEDED` imported-library enumeration (real `PT_DYNAMIC`→`.dynstr` vaddr-to-file-offset
+  resolution), and embedded printable-string extraction with secret/internal-host pattern matching and
+  redaction (mirrors `tools/secret_scanner.py`'s masking convention — a matched value never leaves the tool
+  unmasked).
+- **`agents/binary.py::BinaryAssessmentAgent`** (new, registered in `agents/registry.py`): applies to
+  `target_type == "binary"`; proposes format/hardening/imports/strings tasks, all through `ctx.call`
+  (never a direct file-open outside a registered tool); raises CANDIDATE findings only, never
+  self-confirms; records a limitation and marks the task `blocked` (not `done`) whenever a check can't run
+  for the binary's actual format, rather than reporting a silent "checked, clean" result.
+- **`validation/checks_binary.py::BinaryChecks`** (new, mixed into `validation/validator.py`): independently
+  re-parses the binary fresh for every finding (never trusts the agent's claim) before confirming —
+  identical discipline to every other finding type in this codebase.
+- **`core/coverage.py`**: new `SurfaceSpec(name="Binary analysis", applies_to=BIN, ...)` with the exact
+  static-vs-not-implemented scope baked into its `note` field. The pre-existing `Process & CLI` `SurfaceSpec`
+  (anticipated for future dynamic/execution-based analysis) is untouched and confirmed, live, to render as
+  `NOT_ASSESSED`.
+- **Tests**: 20 new unit tests (`tests/unit/test_binary_scanner.py`) against synthetic, hand-built ELF/PE/
+  Mach-O byte fixtures (`tests/fixtures_binary.py`, built with `struct.pack` — no real compiled binaries, no
+  malware samples) covering correct identification, hardening detection (both present and missing), import
+  enumeration, and graceful degradation on truncated/corrupt/unrecognized input; 5 new integration tests
+  (`tests/integration/test_binary_assessment.py`) running a real `run_assessment()` against fixture files,
+  proving `target_type` classification, coverage status (including `PARTIALLY_ASSESSED` for a PE binary
+  where imports are unsupported), and independent-validation confirmation end to end.
+
+### Deferred (documented, not silently missing)
+- **PE import-table parsing.** Walking sections to the import directory RVA and resolving
+  `IMAGE_IMPORT_DESCRIPTOR` entries was judged too large to implement and verify correctly with confidence
+  in this pass. A PE binary's import task is honestly marked `blocked`, coverage becomes
+  `PARTIALLY_ASSESSED`, never silently empty or clean.
+- **Mach-O load-command parsing.** Identification stays header-level only (bits/endianness from the magic
+  bytes); hardening and import checks report `supported: False` for Mach-O.
+- **All dynamic/execution-based binary analysis.** The target binary is never run, mapped, or sandboxed in
+  this milestone — no sandboxing infrastructure was built. The `Process & CLI` coverage surface remains
+  `NOT_ASSESSED`.
+
 ## Unreleased - Release stabilization: budget-conflation fix, test coverage gaps closed
 
 ### Fixed

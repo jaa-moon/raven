@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from core.models import Confidence, Finding, FindingStatus, ToolResult
 from validation.baseline import SPAFallbackDetector
+from validation.checks_binary import BinaryChecks
 from validation.checks_net import NetChecks
 from validation.checks_static import StaticChecks
 from validation.checks_web import WebChecks
@@ -45,7 +46,7 @@ _STATE_TO_STATUS = {
 _CONF = {"High": Confidence.HIGH, "Medium": Confidence.MEDIUM, "Low": Confidence.LOW}
 
 
-class FindingValidator(WebChecks, StaticChecks, NetChecks, InjectionChecks):
+class FindingValidator(WebChecks, StaticChecks, NetChecks, InjectionChecks, BinaryChecks):
     def __init__(self, ctx: ValidationContext) -> None:
         self.ctx = ctx
         self._baselines: Dict[str, SPAFallbackDetector] = {}

@@ -31,15 +31,29 @@ def _sql_evidence(url: str, parameter: str, data: Dict[str, Any], note: str) -> 
               "error_based": s["error_based"], "boolean_based": s["boolean_based"]})
 
 
+def _graphql_call_args(sig: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+    """When the candidate's signal came from a GraphQL parameter, carry the
+    same operation/field/baseline-variables context the agent-side probe used
+    into the validator's OWN fresh call -- without it, `_place()` would have
+    no way to rebuild the GraphQL request and every re-test would fail
+    uniformly, so a real GraphQL finding could never reach CONFIRMED."""
+    if sig.get("location") != "graphql":
+        return base
+    return {**base, "operation_type": sig.get("operation_type", "query"), "field": sig.get("field", ""),
+           "top_level_args": sig.get("top_level_args", {}), "baseline_variables": sig.get("baseline_variables", {})}
+
+
 class InjectionChecks:
     async def _v_sql_injection(self, f: Finding) -> Finding:  # type: ignore[misc]
         sig = f.signal
         url, parameter = sig["url"], sig["parameter"]
         method, location = sig.get("method", "GET"), sig.get("location", "query")
+        call_args = _graphql_call_args(sig, {"url": url, "parameter": parameter, "method": method,
+                                             "location": location})
         runs = []
         for i in range(2):                                     # repeatability, never a one-shot verdict
             res = await self.ctx.call(
-                "injection.sql.validate", {"url": url, "parameter": parameter, "method": method, "location": location},
+                "injection.sql.validate", call_args,
                 f"Re-test SQL injection on '{parameter}' (independent re-run {i + 1}/2)")
             if not res.ok:
                 return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,
@@ -106,8 +120,10 @@ class InjectionChecks:
         sig = f.signal
         url, parameter = sig["url"], sig["parameter"]
         method, location = sig.get("method", "GET"), sig.get("location", "query")
+        call_args = _graphql_call_args(sig, {"url": url, "parameter": parameter, "method": method,
+                                             "location": location})
         res = await self.ctx.call(
-            "injection.ssrf.validate", {"url": url, "parameter": parameter, "method": method, "location": location},
+            "injection.ssrf.validate", call_args,
             f"Re-test SSRF on '{parameter}' with a fresh callback token")
         if not res.ok:
             return conclude(f, FindingStatus.INCONCLUSIVE, Confidence.LOW,

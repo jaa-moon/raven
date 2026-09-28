@@ -99,10 +99,33 @@ def _file_classify(path: str) -> Dict[str, Any]:
     return file_classify(path)
 
 
+def _binary_format_id(path: str) -> Dict[str, Any]:
+    from tools.binary_scanner import identify
+    return identify(path)
+
+
+def _binary_hardening(path: str) -> Dict[str, Any]:
+    from tools.binary_scanner import hardening
+    return hardening(path)
+
+
+def _binary_imports(path: str) -> Dict[str, Any]:
+    from tools.binary_scanner import imports
+    return imports(path)
+
+
+def _binary_strings(path: str) -> Dict[str, Any]:
+    from tools.binary_scanner import extract_strings
+    return extract_strings(path)
+
+
 async def _sql_injection_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
-                               timeout: float = 10.0) -> Dict[str, Any]:
+                               timeout: float = 10.0, operation_type: str = "query", field: str = "",
+                               top_level_args: Optional[Dict[str, str]] = None,
+                               baseline_variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from tools.injection_probe import sql_probe
-    return await sql_probe(url, parameter, method, location, timeout)
+    return await sql_probe(url, parameter, method, location, timeout, operation_type=operation_type,
+                           field=field, top_level_args=top_level_args, baseline_variables=baseline_variables)
 
 
 async def _xss_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
@@ -112,9 +135,12 @@ async def _xss_probe(url: str, parameter: str, method: str = "GET", location: st
 
 
 async def _ssrf_probe(url: str, parameter: str, method: str = "GET", location: str = "query",
-                      timeout: float = 10.0) -> Dict[str, Any]:
+                      timeout: float = 10.0, operation_type: str = "query", field: str = "",
+                      top_level_args: Optional[Dict[str, str]] = None,
+                      baseline_variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from tools.injection_probe import ssrf_probe
-    return await ssrf_probe(url, parameter, method, location, timeout)
+    return await ssrf_probe(url, parameter, method, location, timeout, operation_type=operation_type,
+                            field=field, top_level_args=top_level_args, baseline_variables=baseline_variables)
 
 
 def build_registry() -> ToolRegistry:
@@ -191,6 +217,34 @@ def build_registry() -> ToolRegistry:
         input_schema={"path": P(required=True)}, scope_args={"path": "path"}, handler=_file_classify,
     ))
     reg.register(ToolDefinition(
+        name="binary_format_id",
+        description="Identify a binary's container format and CPU architecture from its header "
+                    "(ELF/PE/Mach-O; static, read-only, never executes the file).",
+        capabilities=["binary_format_id"], target_types=["binary"], risk_level="passive",
+        input_schema={"path": P(required=True)}, scope_args={"path": "path"}, handler=_binary_format_id,
+    ))
+    reg.register(ToolDefinition(
+        name="binary_hardening",
+        description="Header-level exploit-mitigation indicators: ELF NX-stack/RELRO-proxy/PIE-proxy, "
+                    "PE ASLR/DEP DllCharacteristics bits.",
+        capabilities=["binary_hardening"], target_types=["binary"], risk_level="passive",
+        input_schema={"path": P(required=True)}, scope_args={"path": "path"}, handler=_binary_hardening,
+    ))
+    reg.register(ToolDefinition(
+        name="binary_imports",
+        description="Enumerate imported shared libraries (ELF DT_NEEDED; PE import-table parsing is "
+                    "not implemented in this build).",
+        capabilities=["binary_imports"], target_types=["binary"], risk_level="passive",
+        input_schema={"path": P(required=True)}, scope_args={"path": "path"}, handler=_binary_imports,
+    ))
+    reg.register(ToolDefinition(
+        name="binary_strings",
+        description="Extract embedded printable strings and flag suspicious patterns (hardcoded-looking "
+                    "secrets, internal hosts/URLs); matched values are redacted.",
+        capabilities=["binary_strings"], target_types=["binary"], risk_level="passive",
+        input_schema={"path": P(required=True)}, scope_args={"path": "path"}, handler=_binary_strings,
+    ))
+    reg.register(ToolDefinition(
         name="file_inspect", description="Read a line range from a file inside the permitted roots.",
         capabilities=["file_inspection"], target_types=src, risk_level="passive",
         input_schema={"path": P(required=True), "start": P(type="int", default=1), "end": P(type="int", default=0)},
@@ -203,11 +257,23 @@ def build_registry() -> ToolRegistry:
         "method": P(type="string", default="GET"), "location": P(type="string", default="query"),
         "timeout": P(type="float", default=10.0),
     }
+    # SQLi/SSRF only: the extra shape needed to place a payload into a GraphQL
+    # request (see `tools/injection_probe.py::_place`, `location="graphql"`).
+    # XSS on GraphQL arguments is deliberately deferred (a JSON response's
+    # payload reflection is not HTML-context executability -- see
+    # PROJECT_STATUS.md), so `xss_probe` keeps the plain REST/HTML schema.
+    graphql_injection_schema = {
+        **injection_schema,
+        "operation_type": P(type="string", default="query", description="GraphQL 'query' or 'mutation'."),
+        "field": P(type="string", default="", description="The GraphQL root field under test."),
+        "top_level_args": P(type="dict", description="arg name -> GraphQL type string, e.g. {'id': 'ID!'}."),
+        "baseline_variables": P(type="dict", description="Safe baseline value for every argument of `field`."),
+    }
     reg.register(ToolDefinition(
         name="sql_injection_probe",
         description="Controlled boolean/error-based SQL injection probe (two benign baselines for jitter + 3 non-destructive payloads).",
         capabilities=["injection.sql.detect", "injection.sql.validate"], target_types=WEB, risk_level="moderate",
-        input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
+        input_schema=graphql_injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
         timeout_seconds=25.0, expensive=True, handler=_sql_injection_probe,
     ))
     reg.register(ToolDefinition(
@@ -221,7 +287,7 @@ def build_registry() -> ToolRegistry:
         name="ssrf_probe",
         description="Controlled SSRF probe using a Raven-hosted loopback callback canary (never an arbitrary host).",
         capabilities=["injection.ssrf.detect", "injection.ssrf.validate"], target_types=WEB, risk_level="moderate",
-        input_schema=injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
+        input_schema=graphql_injection_schema, scope_args={"url": "url"}, requirements=["py:httpx"],
         timeout_seconds=20.0, expensive=True, handler=_ssrf_probe,
     ))
     return reg

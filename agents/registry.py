@@ -33,6 +33,7 @@ class AgentRegistry:
 
 
 def default_registry() -> AgentRegistry:
+    from agents.binary import BinaryAssessmentAgent
     from agents.injection import InjectionTestAgent
     from agents.network import NetworkReconAgent, ServiceAssessmentAgent
     from agents.source import SourceAssessmentAgent
@@ -42,6 +43,7 @@ def default_registry() -> AgentRegistry:
 
     reg = AgentRegistry()
     for agent in (WebReconAgent(), WebSecurityAgent(), WebExposureAgent(), InjectionTestAgent(),
-                  NetworkReconAgent(), ServiceAssessmentAgent(), SourceAssessmentAgent()):
+                  NetworkReconAgent(), ServiceAssessmentAgent(), SourceAssessmentAgent(),
+                  BinaryAssessmentAgent()):
         reg.register(agent)
     return reg

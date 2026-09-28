@@ -68,6 +68,29 @@ and SSRF detection via a Raven-hosted loopback callback canary rather than an ar
 **Active probing only runs above the default scope risk ceiling** (`assess --max-risk moderate`); below that
 it is recorded as an explicit limitation, never silently skipped, and no active request is ever attempted.
 
+Since introspection is enabled, this also covers **GraphQL query arguments** (`agents/web_recon.py` parses
+a full introspection response via `core/graphql_schema.py` into testable scalar leaf arguments — top-level or
+nested inside an input object — while skipping any field with a required list/enum/unresolvable-type argument
+rather than guessing). GraphQL SQLi/SSRF ride the same discovery → candidate → independent-revalidation
+pipeline as REST. **Not covered:** GraphQL mutation arguments (mutations write data; safely defaulting an
+arbitrary mutation's full argument set without a live target to validate against was judged too large to
+implement with confidence in one pass) and GraphQL XSS (a GraphQL response is JSON-escaped, not
+HTML-escaped, and the shared REST/HTML reflection heuristic would misclassify inert JSON-context reflection
+as executable — rather than weaken that shared heuristic, GraphQL XSS testing was left out entirely). Both
+are documented gaps, not silent omissions.
+
+### Binary analysis (static only)
+
+`BinaryAssessmentAgent` (`agents/binary.py`) assesses a single authorized local ELF/PE/Mach-O executable:
+format and architecture identification, header-level hardening indicators (ELF NX-stack/RELRO-proxy/
+PIE-proxy; PE ASLR/DEP), ELF `DT_NEEDED` imported-library enumeration, and embedded-string inspection
+(secret-shaped and internal-host-shaped strings are flagged and redacted before they reach a report, the
+same way `tools/secret_scanner.py` redacts source-code secrets). All parsing is hand-rolled with `struct` —
+no new dependency. **The target binary is never executed, mapped, or sandboxed** — this is a static-only
+first milestone. Not implemented: PE import-table parsing, Mach-O load-command parsing (hardening/imports
+stay unsupported for Mach-O), and all dynamic/execution-based analysis (the `Process & CLI` coverage surface
+stays `NOT_ASSESSED`, never rendered as clean).
+
 ### Adding a capability
 
 1. Add a tool: `ToolDefinition(name=…, capabilities=[…], input_schema=…, risk_level=…, scope_args=…, handler=…)`
@@ -95,8 +118,12 @@ python -m pytest            # unit + integration (real local servers) + regressi
   raised to `--max-risk moderate` or higher. SSRF confirmation depends on the target being able to reach
   Raven's loopback callback, which is not true across most real network boundaries for a remote target;
   a rejection there is reported as such, never as proof of absence.
-- **Target types:** URL/web, host/network service, and source directory are supported. Binaries, containers,
-  cloud and Kubernetes targets are classified but have no agents yet (coverage reports them as not assessed).
+- **GraphQL:** query-argument discovery and active SQLi/SSRF testing only. Mutation arguments are discovered
+  but never actively tested (data-writing, no live target to validate a safe baseline against); GraphQL XSS
+  is not tested at all (see above).
+- **Target types:** URL/web, host/network service, and source directory are fully supported. Local binaries
+  (ELF/PE/Mach-O) get static-only analysis — see above; dynamic/execution-based binary analysis is not
+  implemented. Containers, cloud, and Kubernetes targets are classified but have no agents yet.
 - Knowledge retrieval is lexical (BM25), not embedding-based.
 - File-permission auditing is POSIX-only (reported as `BLOCKED` on Windows).
 - Static-analysis hits are pattern-based; unsafe constructs stay `INCONCLUSIVE` until data flow is shown.

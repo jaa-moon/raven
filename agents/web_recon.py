@@ -7,11 +7,13 @@ goes into the TargetProfile, which is what triggers re-planning.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import List
 
 from agents.base import Agent, AgentContext, AgentResult
 from agents.web_common import base_url, classify, load_detector, store_baseline, url_for
+from core.graphql_schema import parse_introspection
 from validation.baseline import SPAFallbackDetector
 from core.models import Severity, TestTask
 from core.profile import TargetProfile
@@ -26,6 +28,19 @@ MAX_ROUTES = 15
 
 API_PATHS = ["/api", "/rest", "/api/v1", "/openapi.json", "/swagger.json", "/api-docs", "/v2/api-docs"]
 _API_HINT = re.compile(r"(?i)(^|/)(api|rest|graphql|v[0-9]+)(/|$)")
+
+# Bounded-depth (4 levels: a field/arg's own `type` plus up to 3 `ofType`
+# unwraps) TypeRef fragment, shared by every `type` reference in the full
+# introspection query below -- deep enough to resolve the common
+# NonNull(List(NonNull(Scalar))) wrapper shapes real schemas use, without
+# unbounded recursion into the schema itself. `core.graphql_schema.parse_introspection`
+# is the only thing that interprets the response this produces.
+_GRAPHQL_TYPE_REF = "kind name ofType{kind name ofType{kind name ofType{kind name}}}"
+_FULL_GRAPHQL_INTROSPECTION_QUERY = (
+    "{__schema{queryType{name}mutationType{name}types{kind name "
+    "fields{name type{" + _GRAPHQL_TYPE_REF + "}args{name type{" + _GRAPHQL_TYPE_REF + "}}}"
+    "inputFields{name type{" + _GRAPHQL_TYPE_REF + "}}}}}"
+)
 
 
 class WebReconAgent(Agent):
@@ -213,20 +228,80 @@ class WebReconAgent(Agent):
         if not res.ok:
             return AgentResult(success=False, error=res.error)
         cls = classify("/graphql", res.data, load_detector(ctx.profile))
-        if cls.is_json and cls.classification != ResponseClass.SPA_FALLBACK:
-            ctx.profile.add_surface("graphql")
-            ctx.profile.api = True
-            ctx.observe("api.graphql", "GraphQL", "GraphQL endpoint responded with JSON.",
-                        status=res.data["status_code"])
-            if '"__schema"' in res.data["body"]:
-                ctx.candidate(
-                    title="GraphQL introspection enabled", category="GraphQLIntrospectionEnabled",
-                    severity=Severity.LOW, surface="GraphQL", location=url_for(ctx.profile, "/graphql"),
-                    description="The GraphQL endpoint answered an introspection query.",
-                    signal={"validator": "api_docs_exposure",
-                            "url": url_for(ctx.profile, "/graphql") + "?query=%7B__schema%7Btypes%7Bname%7D%7D%7D"},
-                    remediation="Disable introspection in production.")
-        else:
+        if not (cls.is_json and cls.classification != ResponseClass.SPA_FALLBACK):
             ctx.observe("api.graphql", "GraphQL", "No GraphQL endpoint at /graphql.",
                         classification=cls.classification.value)
+            return AgentResult(summary=f"graphql: {cls.classification.value}")
+
+        ctx.profile.add_surface("graphql")
+        ctx.profile.api = True
+        ctx.observe("api.graphql", "GraphQL", "GraphQL endpoint responded with JSON.",
+                    status=res.data["status_code"])
+        if '"__schema"' in res.data["body"]:
+            ctx.candidate(
+                title="GraphQL introspection enabled", category="GraphQLIntrospectionEnabled",
+                severity=Severity.LOW, surface="GraphQL", location=url_for(ctx.profile, "/graphql"),
+                description="The GraphQL endpoint answered an introspection query.",
+                signal={"validator": "api_docs_exposure",
+                        "url": url_for(ctx.profile, "/graphql") + "?query=%7B__schema%7Btypes%7Bname%7D%7D%7D"},
+                remediation="Disable introspection in production.")
+            await self._graphql_schema(ctx)
+        else:
+            ctx.state.add_limitation(
+                "GraphQL schema discovery for active injection testing was not possible: the endpoint at "
+                "/graphql responded but introspection appears disabled (no '__schema' in the response). "
+                "GraphQL query/mutation arguments could not be enumerated, so no GraphQL-specific SQL "
+                "injection/SSRF testing was performed -- this is not evidence the underlying arguments "
+                "are safe.")
         return AgentResult(summary=f"graphql: {cls.classification.value}")
+
+    async def _graphql_schema(self, ctx: AgentContext) -> None:
+        """Fetch the full introspection response (types/fields/args/inputFields,
+        not just type names) and turn it into the bounded set of testable
+        query-argument leaves `InjectionTestAgent` folds into its own
+        `injection_surface` (see `core.graphql_schema.parse_introspection`).
+        Degrades to an honest limitation -- never a crash, never a fabricated
+        surface -- on any unreachable/unparsable/incomplete response."""
+        res = await self._get(ctx, "/graphql", params={"query": _FULL_GRAPHQL_INTROSPECTION_QUERY})
+        if not res.ok:
+            ctx.state.add_limitation(
+                f"Full GraphQL schema introspection failed ({res.error}); GraphQL arguments could not be "
+                "enumerated for active injection testing.")
+            return
+        try:
+            body = json.loads(res.data.get("body", "") or "")
+        except (ValueError, TypeError):
+            ctx.state.add_limitation(
+                "The full GraphQL introspection response was not valid JSON; GraphQL arguments could not "
+                "be enumerated for active injection testing.")
+            return
+        schema = (body.get("data") or {}).get("__schema") if isinstance(body, dict) else None
+        if not isinstance(schema, dict):
+            ctx.state.add_limitation(
+                "The full GraphQL introspection response did not contain a usable '__schema'; GraphQL "
+                "arguments could not be enumerated for active injection testing.")
+            return
+        if not isinstance(schema.get("types"), list):
+            # A well-formed introspection response always has a `types` list
+            # (even if the schema itself is tiny); its absence means the
+            # response is incomplete/malformed, not merely a schema with no
+            # testable fields -- record it honestly instead of silently
+            # discovering nothing.
+            ctx.state.add_limitation(
+                "The full GraphQL introspection response was missing/incomplete '__schema.types' data; "
+                "GraphQL arguments could not be enumerated for active injection testing.")
+        parsed = parse_introspection(schema)
+        operations = parsed["operations"]
+        ctx.profile.attributes["graphql_operations"] = operations
+        n_leaves = sum(len(op["testable_leaves"]) for op in operations)
+        ctx.observe("api.graphql.schema", "GraphQL",
+                    f"{len(operations)} GraphQL operation(s) with {n_leaves} testable scalar argument(s) "
+                    f"discovered via introspection ({len(parsed['skipped'])} operation(s) skipped: an "
+                    "argument type could not be safely defaulted).",
+                    operations=[f"{op['operation_type']}.{op['field']}" for op in operations],
+                    skipped=parsed["skipped"])
+        if parsed["skipped"]:
+            ctx.state.add_limitation(
+                f"{len(parsed['skipped'])} GraphQL operation(s) were not added to active testing because "
+                "at least one required argument's type could not be safely defaulted (a list, enum, or "
+                f"unsupported/custom scalar): {', '.join(parsed['skipped'])}.")

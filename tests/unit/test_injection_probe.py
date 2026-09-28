@@ -102,3 +102,53 @@ async def test_ssrf_probe_rejects_when_application_rejects_the_url(vulnerable_se
     req = _place(vulnerable_server.url + "/fetch", "GET", "url", "query", "http://example.invalid/x")
     resp = await _fetch(**req)
     assert resp["status_code"] == 400
+
+
+# ── GraphQL: request building + end-to-end probe behavior against a real fixture ──
+
+_USER_BY_ID_ARGS = {"id": "ID!"}
+_USER_BY_ID_BASELINE = {"id": "1"}
+
+
+def test_place_graphql_builds_a_valid_document_and_sets_the_variable_under_test():
+    from tools.injection_probe import _place
+    req = _place("http://x/graphql", "POST", "id", "graphql", "raven1' OR '1'='1' -- ",
+                operation_type="query", field="userById", top_level_args=_USER_BY_ID_ARGS,
+                baseline_variables=_USER_BY_ID_BASELINE)
+    assert req["url"] == "http://x/graphql" and req["method"] == "POST" and req["data"] is None
+    body = req["json_body"]
+    assert body["query"] == "query($id: ID!) { userById(id: $id) { __typename } }"
+    assert body["variables"] == {"id": "raven1' OR '1'='1' -- "}
+
+
+def test_place_graphql_sets_a_nested_dotted_variable_without_disturbing_siblings():
+    from tools.injection_probe import _place
+    baseline = {"input": {"name": "raven1", "age": 1, "active": True}}
+    req = _place("http://x/graphql", "POST", "input.name", "graphql", "raven1'",
+                operation_type="mutation", field="createUser",
+                top_level_args={"input": "CreateUserInput!"}, baseline_variables=baseline)
+    assert req["json_body"]["variables"] == {"input": {"name": "raven1'", "age": 1, "active": True}}
+    # The original baseline dict passed in must never be mutated in place.
+    assert baseline["input"]["name"] == "raven1"
+
+
+async def test_sql_probe_detects_error_signature_on_a_vulnerable_graphql_field(graphql_server):
+    data = await sql_probe(graphql_server.url + "/graphql", "id", method="POST", location="graphql",
+                           operation_type="query", field="userById", top_level_args=_USER_BY_ID_ARGS,
+                           baseline_variables=_USER_BY_ID_BASELINE)
+    tests = data["tests"]
+    assert tests["baseline"]["sql_error_signature"] is False
+    assert tests["baseline"]["status_code"] == 200
+    assert tests["quote"]["sql_error_signature"] is True
+    assert tests["quote"]["status_code"] == 200          # GraphQL: HTTP 200 even for a resolver error
+
+
+async def test_sql_probe_on_a_non_vulnerable_graphql_field_is_uninteresting(graphql_server):
+    data = await sql_probe(graphql_server.url + "/graphql", "id", method="POST", location="graphql",
+                           operation_type="query", field="safeById",
+                           top_level_args={"id": "ID!", "webhookUrl": "String"},
+                           baseline_variables={"id": "1", "webhookUrl": "raven1"})
+    tests = data["tests"]
+    assert not any(t.get("sql_error_signature") for t in tests.values() if isinstance(t, dict))
+    bodies = {t.get("body") for t in tests.values() if isinstance(t, dict)}
+    assert len(bodies) == 1                              # identical response regardless of payload

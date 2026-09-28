@@ -176,6 +176,12 @@ class InjectionTestAgent(Agent):
                 "Discover input surface: forms, query/path parameters, cookies, and any published "
                 "OpenAPI/Swagger spec", priority=58, cost=2,
                 rationale="Active injection testing needs real discovered parameters, not guesses."))
+        else:
+            # Idempotent, called every planning pass (not just once): GraphQL
+            # introspection (`WebReconAgent`) may finish before or after this
+            # agent's own one-time HTML-based discovery task above, so this
+            # keeps picking up `graphql_operations` regardless of order.
+            self._merge_graphql_operations(p)
         if not self._active_testing_permitted(state):
             return tasks
         for endpoint, info in sorted(p.attributes.get("injection_surface", {}).items()):
@@ -183,30 +189,92 @@ class InjectionTestAgent(Agent):
             for param in info.get("params", []):
                 pname, location = param["name"], param.get("location", "query")
                 evidence = param.get("evidence", "guessed")
-                ev_note = {"spec": "an OpenAPI/Swagger definition", "form": "a real HTML form field",
-                          "cookie": "an observed Set-Cookie", "observed": "an observed link/endpoint",
-                          "guessed": "the REST 'id' naming convention"}[evidence]
+                is_graphql = location == "graphql"
+                ev_note = ("a GraphQL introspection query" if is_graphql else
+                          {"spec": "an OpenAPI/Swagger definition", "form": "a real HTML form field",
+                           "cookie": "an observed Set-Cookie", "observed": "an observed link/endpoint",
+                           "guessed": "the REST 'id' naming convention"}[evidence])
+                graphql_extra: Dict[str, Any] = {}
+                if is_graphql:
+                    # `pname` (e.g. "userById.id") is only a display/dedup key;
+                    # the capability call needs the dotted variable path within
+                    # THIS field's own `variables` object (e.g. "id"), plus
+                    # everything else `_place()` needs to build a syntactically
+                    # valid request around it (see `tools/injection_probe.py`).
+                    graphql_extra = {"operation_type": param.get("operation_type", "query"),
+                                     "field": param.get("field", ""),
+                                     "top_level_args": param.get("top_level_args", {}),
+                                     "baseline_variables": param.get("baseline_variables", {})}
+                    test_target = param.get("variable_path", pname)
+                else:
+                    test_target = pname
                 tasks.append(self.task(
                     f"sql::{endpoint}::{location}::{pname}", "injection.sql.detect", "SQL Injection",
                     f"Test parameter '{pname}' on {endpoint} for SQL injection",
                     priority=_task_priority(InjectionType.SQL_INJECTION, endpoint, pname, evidence), cost=4,
                     rationale=f"'{pname}' is an untrusted {location} input reaching {endpoint} ({ev_note}).",
-                    endpoint=endpoint, method=method, parameter=pname, location=location))
-                tasks.append(self.task(
-                    f"xss::{endpoint}::{location}::{pname}", "injection.xss.reflect", "XSS",
-                    f"Test parameter '{pname}' on {endpoint} for reflected XSS",
-                    priority=_task_priority(InjectionType.XSS, endpoint, pname, evidence), cost=1,
-                    rationale=f"'{pname}' is an untrusted {location} input that may be reflected in output "
-                              f"({ev_note}).",
-                    endpoint=endpoint, method=method, parameter=pname, location=location))
-                if location in ("query", "body") and _looks_url_like(pname):
+                    endpoint=endpoint, method=method, parameter=test_target, location=location, **graphql_extra))
+                if not is_graphql:
+                    # Reflected-XSS testing is deferred for GraphQL: a JSON
+                    # response's payload reflection is JSON-escaped, not
+                    # HTML-escaped, so the existing tag-breakout heuristic
+                    # (`core/injection_signals.py::xss_signals`) would
+                    # misclassify a JSON-context reflection as executable
+                    # HTML/JS -- see PROJECT_STATUS.md for the full reasoning.
+                    tasks.append(self.task(
+                        f"xss::{endpoint}::{location}::{pname}", "injection.xss.reflect", "XSS",
+                        f"Test parameter '{pname}' on {endpoint} for reflected XSS",
+                        priority=_task_priority(InjectionType.XSS, endpoint, pname, evidence), cost=1,
+                        rationale=f"'{pname}' is an untrusted {location} input that may be reflected in output "
+                                  f"({ev_note}).",
+                        endpoint=endpoint, method=method, parameter=pname, location=location))
+                if _looks_url_like(test_target) and (location in ("query", "body") or is_graphql):
                     tasks.append(self.task(
                         f"ssrf::{endpoint}::{location}::{pname}", "injection.ssrf.detect", "SSRF",
                         f"Test parameter '{pname}' on {endpoint} for SSRF",
                         priority=_task_priority(InjectionType.SSRF, endpoint, pname, evidence), cost=2,
                         rationale=f"'{pname}' looks like a server-fetched URL/destination ({ev_note}).",
-                        endpoint=endpoint, method=method, parameter=pname, location=location))
+                        endpoint=endpoint, method=method, parameter=test_target, location=location,
+                        **graphql_extra))
         return tasks
+
+    def _merge_graphql_operations(self, p: TargetProfile) -> None:
+        """Fold any GraphQL schema `WebReconAgent` has discovered via
+        introspection (`p.attributes['graphql_operations']`) into the same
+        `injection_surface` dict REST/HTML discovery populates, so GraphQL
+        arguments flow through the exact same propose_tasks/_test/validate
+        pipeline as every other parameter. Only QUERY operations are added --
+        mutation-argument testing is a deliberate, documented gap (mutations
+        write data; see PROJECT_STATUS.md). Idempotent: safe to call on every
+        planning pass."""
+        ops = p.attributes.get("graphql_operations") or []
+        if not ops:
+            return
+        surface = p.attributes.setdefault("injection_surface", {})
+        entry = surface.setdefault("/graphql", {"method": "POST", "params": []})
+        existing = {param["name"] for param in entry["params"]}
+        for op in ops:
+            if op.get("operation_type") != "query":
+                continue
+            field = op.get("field", "")
+            top_level_args = op.get("top_level_args") or {}
+            baseline_variables = op.get("baseline_variables") or {}
+            for leaf in op.get("testable_leaves") or []:
+                vpath, vtype = leaf.get("variable_path"), leaf.get("variable_type")
+                if not vpath:
+                    continue
+                pname = f"{field}.{vpath}"
+                if pname in existing:
+                    continue
+                existing.add(pname)
+                entry["params"].append({
+                    "name": pname, "location": "graphql", "evidence": "spec",
+                    "operation_type": "query", "field": field, "variable_path": vpath,
+                    "variable_type": vtype, "top_level_args": top_level_args,
+                    "baseline_variables": baseline_variables,
+                })
+        if entry["params"]:
+            p.add_endpoint("/graphql")
 
     def _active_testing_permitted(self, state: AssessmentState) -> bool:
         allowed = RISK_ORDER.get(state.scope.max_risk, 0) >= RISK_ORDER.get(MIN_ACTIVE_RISK, 2)
@@ -352,8 +420,15 @@ class InjectionTestAgent(Agent):
         endpoint, method, parameter, location = (params["endpoint"], params["method"],
                                                   params["parameter"], params["location"])
         url = url_for(ctx.profile, endpoint)
-        res = await ctx.call(task.capability,
-                             {"url": url, "parameter": parameter, "method": method, "location": location},
+        call_args = {"url": url, "parameter": parameter, "method": method, "location": location}
+        graphql_extra: Dict[str, Any] = {}
+        if location == "graphql":
+            graphql_extra = {"operation_type": params.get("operation_type", "query"),
+                             "field": params.get("field", ""),
+                             "top_level_args": params.get("top_level_args", {}),
+                             "baseline_variables": params.get("baseline_variables", {})}
+            call_args.update(graphql_extra)
+        res = await ctx.call(task.capability, call_args,
                              f"Test '{parameter}' ({location}) on {endpoint} for {kind.value}")
         hyp = InjectionHypothesis(type=kind, target=base_url(ctx.profile), endpoint=endpoint, method=method,
                                   parameter=parameter, location=location, rationale=task.rationale)
@@ -376,7 +451,7 @@ class InjectionTestAgent(Agent):
                 location=url, description=why, impact=_IMPACT[kind], remediation=_REMEDIATION[kind],
                 reproduction=[f"{method} {url} with {location} parameter '{parameter}' varied (controlled payloads)"],
                 signal={"validator": _VALIDATOR[kind], "url": url, "method": method,
-                       "parameter": parameter, "location": location, "hint": redacted})
+                       "parameter": parameter, "location": location, "hint": redacted, **graphql_extra})
             if finding:
                 hyp.finding_id = finding.finding_id
         ctx.state.injection_hypotheses.append(hyp)
