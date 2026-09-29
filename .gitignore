@@ -23,6 +23,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Local-only files kept out of the public repo (see release_excluded/README.md)
+release_excluded/
+
 # Raven local data
 .raven/
 .harass/
