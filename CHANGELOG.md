@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased - Reproducible assessment benchmark
+## v5.0.0 - 2026-09-29 - First public release
+
+Raven's first public GitHub release. Verified on this baseline (commit prior to the release commit):
+
+- **Full test suite:** 259 passed, 1 skipped (the skip is the POSIX-only SUID file-permission test).
+- **Assessment benchmark** (`python -m benchmark`): 12/13 scenarios pass, 1 POSIX-only skip, 0 failures,
+  0 unexpected confirmations (detection 30/30, coverage 18/18, false-positive gate 6/6, report 41/41).
+- **Clean install:** `pip install -r requirements.txt` in a fresh virtual environment runs
+  `raven.py version`, `raven.py --help`, and an end-to-end `raven.py scan mock_project --yes`, producing
+  a usable, secret-redacted `.md` + `.json` report with no LLM server required.
+
+Release-hardening changes only — no behavioural change to the assessment engine: unified the reported
+version to `5.0.0` across the CLI, menu and banner (previously an inconsistent mix of `v3.1` and
+`v0.5.0`); extended `.gitignore` to exclude a stray local `config.json`, local audit-scratch dirs, and
+packaging/type-checker/linter caches; removed an empty local audit-artifact directory. The change groups
+below detail everything included in this release since `3.1.0`, most recent first.
+
+## v5.0.0 - Reproducible assessment benchmark
 
 A new `benchmark/` package measures Raven's *actual assessment outcomes* on a fixed set of controlled,
 local, authorized scenarios by running the real pipeline (intake → analysis → planner → gateway →
@@ -30,7 +47,7 @@ existing test fixtures so it exercises the same controlled targets the integrati
   benchmark establishes repeatable behaviour on controlled scenarios only, makes no real-world-target
   claim, and is too small for a population-level false-positive/detection rate.
 
-## Unreleased - Binary target file-permission auditing
+## v5.0.0 - Binary target file-permission auditing
 
 The `permission_scan` tool already declared `binary` an in-scope target type and already supported a
 single-file target, but no agent requested it for a binary, so the "File permissions" coverage surface
@@ -50,7 +67,7 @@ path.
   file-permission surface is wired (ASSESSED on POSIX / BLOCKED otherwise); a new POSIX-only test creates a
   `0o4755` SUID ELF and asserts the finding is raised and independently `CONFIRMED` with evidence.
 
-## Unreleased - GraphQL input discovery v1 (query arguments, SQLi + SSRF)
+## v5.0.0 - GraphQL input discovery v1 (query arguments, SQLi + SSRF)
 
 Implements the GraphQL variable discovery previously investigated and deferred (see "Investigated,
 deferred" below). Rides the existing active-injection pipeline unchanged: same gateway (scope/budget/
@@ -117,7 +134,7 @@ re-validation in `validation/checks_injection.py`. No change to `raven_mcp/gatew
   (used identically by independent validation) under time pressure, GraphQL XSS is scoped out entirely:
   no `injection.xss.reflect` task is ever emitted for a `location="graphql"` parameter.
 
-## Unreleased - Binary Assessment Agent v1 (static only)
+## v5.0.0 - Binary Assessment Agent v1 (static only)
 
 New capability where none existed: Raven could already classify a target as `binary` (ELF/PE/Mach-O
 magic-byte detection in `tools/inventory.py::file_classify`) but had no agent for it — every binary target
@@ -164,7 +181,7 @@ present together.
   this milestone — no sandboxing infrastructure was built. The `Process & CLI` coverage surface remains
   `NOT_ASSESSED`.
 
-## Unreleased - Release stabilization: budget-conflation fix, test coverage gaps closed
+## v5.0.0 - Release stabilization: budget-conflation fix, test coverage gaps closed
 
 ### Fixed
 - **Budget-dimension conflation could silently skip unrelated test coverage.**
@@ -195,7 +212,7 @@ present together.
   `tools/injection_probe.py` (existing modes can't express GraphQL's JSON `query`+`variables`
   envelope) — a multi-part feature, not a short wiring change. Left for a future milestone.
 
-## Unreleased - Input Surface Discovery v2 and evidence-aware active-testing prioritization
+## v5.0.0 - Input Surface Discovery v2 and evidence-aware active-testing prioritization
 
 Addresses the two gaps identified after the first live active-injection run: discovery was narrowly
 centered on the discovered `id` query parameter, and the planner had no way to prefer high-value active
@@ -234,7 +251,7 @@ enforcement or to independent validation.
   `injection_surface` entry from a GraphQL schema or query, so SQLi/XSS/SSRF on GraphQL arguments is
   untested and reported as `NOT_ASSESSED`, never as clean.
 
-## Unreleased - Risk level made user-configurable
+## v5.0.0 - Risk level made user-configurable
 
 Exposed the existing (already-enforced) assessment risk control through the normal user-facing flow.
 No change to the security model: ScopeValidator, BudgetManager and the Gateway remain authoritative.
@@ -255,7 +272,7 @@ No change to the security model: ScopeValidator, BudgetManager and the Gateway r
   or "no eligible input surface discovered" — instead of a generic "no test was planned", so an unassessed
   surface is never mistaken for "not vulnerable".
 
-## Unreleased - Active Injection Testing hardening
+## v5.0.0 - Active Injection Testing hardening
 
 Strengthened Active Injection Testing v1 without changing Raven's architecture or safety guarantees
 (scope/budget/gateway/independent-validation all preserved).

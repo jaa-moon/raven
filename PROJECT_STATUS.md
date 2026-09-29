@@ -1,9 +1,13 @@
 # Raven — Project Status & Changes Report
 
-**Date:** 2026-09-27
+**Date:** 2026-09-29
 **Branch:** `master`
-**Working tree:** clean (after this round's commit)
-**Version line:** 3.1.0 (Adaptive engine rebuild)
+**Working tree:** clean (after the release-hardening commit)
+**Version line:** 5.0.0 (first public release; adaptive engine)
+**Release status:** **Ready for first public GitHub release.** Verified on this baseline: full suite
+259 passed / 1 skipped; benchmark 12/13 pass + 1 POSIX-only skip, 0 unexpected confirmations; clean
+`pip install` in a fresh venv runs `version`/`--help`/`scan` end to end with a usable, redacted report
+and no LLM required. No GitHub remote is configured yet — see §5 for the exact publish commands.
 
 ---
 

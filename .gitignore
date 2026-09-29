@@ -10,6 +10,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Packaging / type-checker / linter caches
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
 # IDE / OS
 .vscode/
 .idea/
@@ -19,6 +26,10 @@ Thumbs.db
 # Raven local data
 .raven/
 .harass/
+# user config (with API key) is written to ~/.raven; ignore any local repo copy too
+config.json
+# local audit-artifact scratch dirs
+.audit_*/
 raven_assessment_*.md
 raven_assessment_*.json
 mock_project/raven_report_*

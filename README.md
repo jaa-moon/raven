@@ -11,6 +11,9 @@ observe → understand → plan → act → observe → update context → re-pl
 
 ## Quick start
 
+**Requirements:** Python 3.11+ (developed and tested on 3.11; POSIX or Windows). No external services are
+required — an LLM is optional (see below), and file-permission auditing is POSIX-only.
+
 ```bash
 python -m venv venv && venv/Scripts/activate      # or: source venv/bin/activate
 pip install -r requirements.txt
@@ -55,6 +58,17 @@ State = truth · Report = output.
 `tool output → observation → candidate finding → validation → evidence → CONFIRMED | INCONCLUSIVE | REJECTED`.
 Agents can only create candidates. HTTP 200 never confirms anything: candidate paths are compared with a
 nonexistent-route baseline (SPA catch-all detection) and must carry a content signature.
+
+### Interpreting a report
+
+A finding is **CONFIRMED** only after an independent re-check reproduced the behaviour with evidence;
+**INCONCLUSIVE** means a signal was seen but exploitability was not proven (e.g. a pattern match without
+data-flow) — investigate, don't dismiss; **REJECTED** candidates are filtered false positives, reported as
+a count so you can see they were considered. Per-surface **coverage** is separate from findings:
+`ASSESSED` (a test ran to completion), `PARTIALLY_ASSESSED` (ran with gaps), `NOT_ASSESSED` (no test ran —
+never treat as "clean"), `BLOCKED` (applicable but the platform/tool made it impossible, e.g. POSIX-only
+permission auditing on Windows), `NOT_APPLICABLE` (the surface doesn't exist for this target type). "No
+confirmed findings" is always qualified by how much was actually assessed — Raven never reports "clean".
 
 ### Active injection testing (SQLi / XSS / SSRF)
 

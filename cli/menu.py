@@ -120,7 +120,7 @@ def show_help() -> None:
 
 
 def show_version() -> None:
-    console.print("[bold magenta]Raven[/] — Autonomous Security Assessment Platform, v3.1 (adaptive engine)")
+    console.print("[bold magenta]Raven[/] — Autonomous Security Assessment Platform, v5.0.0 (adaptive engine)")
 
 
 async def interactive_menu() -> None:

@@ -27,7 +27,7 @@ _BANNER_ART = r"""
 ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║
 ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝"""
 
-_VERSION = "  v0.5.0"
+_VERSION = "  v5.0.0"
 
 # Fallback for terminals without Unicode block-drawing support
 _PLAIN_BANNER = """

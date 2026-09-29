@@ -165,4 +165,4 @@ def report(assessment_id: str = typer.Argument(..., help="Assessment ID")) -> No
 def version() -> None:
     """Print Raven version info."""
     print_banner(console)
-    console.print("  [bold magenta]Raven Autonomous Security Assessment Platform[/] v3.1 (Adaptive Agentic Engine)\n")
+    console.print("  [bold magenta]Raven Autonomous Security Assessment Platform[/] v5.0.0 (Adaptive Agentic Engine)\n")
