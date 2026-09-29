@@ -16,10 +16,10 @@ finding, and reports honest coverage. It never treats "no findings" as "secure".
 
 Core loop: `observe → understand → plan → act → observe → update context → re-plan`.
 
-Test suite: **241 passing** (unit + integration against real local servers + regression). No
-failing or skipped tests as of this run. (Figure last confirmed 2026-09-23 was 145; it has grown
-across several hardening/audit rounds since, including this round's GraphQL input discovery work
-— see §2.)
+Test suite: **259 passing, 1 skipped** (unit + integration against real local servers + regression;
+the single skip is the POSIX-only SUID file-permission test, skipped on non-POSIX hosts). The V5 round
+added the binary permission fix, planner-contract regression tests, and 15 benchmark self-tests — see §2.
+Separately, `python -m benchmark` runs 13 controlled end-to-end assessment scenarios (12 + 1 POSIX-only).
 
 ---
 
@@ -195,6 +195,27 @@ own claim, exactly like every other finding type in this codebase.
 - Truncated/corrupt headers and unrecognized formats all degrade to a recorded limitation and a `blocked`
   task (never a crash, never a false "checked, clean" result) — unit-tested directly against synthetic,
   hand-built byte fixtures (`tests/fixtures_binary.py`; no real compiled binaries, no malware samples).
+
+### What the V5 round added (`9a299542`, `2a4235cb`, benchmark)
+
+- **Binary file-permission auditing (`9a299542`).** `BinaryAssessmentAgent` now requests the existing
+  `permission_audit` capability on the target binary's own path (SUID/SGID, world-writable — a direct
+  local-privilege-escalation surface), independently re-validated by the existing `file_permission`
+  validator. Previously the "File permissions" surface sat at `NOT_ASSESSED` for every binary although the
+  tool already supported it. POSIX-only; honestly `BLOCKED` on other hosts, never silently `NOT_ASSESSED`.
+- **Planner determinism contract pinned (`2a4235cb`).** The audit's "FIFO starvation" flag was verified
+  *not* a defect (ties are a deterministic ordering rule; only recorded budget floors drop tasks), so the
+  `next_task` ranking (priority → cost → FIFO), non-pending exclusion, and replan idempotency were locked
+  with regression tests rather than by changing working, explainable code.
+- **Reproducible assessment benchmark (`benchmark/`).** A new observer-only package runs the real pipeline
+  against 13 controlled, local, authorized scenarios (web exposure, web-security config, REST + GraphQL
+  input testing, network service identification, source secrets/deps/config/permissions, static binary
+  analysis) with positive/negative/inconclusive/partial cases, and compares each `AssessmentState` +
+  report against a declared expected outcome. It measures detection (produced *and* validated to the
+  expected verdict), coverage-classification accuracy, a false-positive gate, report↔state consistency,
+  and an `unexpected-confirmed` review list (0 for the current fixtures). Run with `python -m benchmark`;
+  15 self-tests cover the framework. It establishes repeatable behaviour on controlled scenarios only and
+  makes no real-world-target claim (§4).
 
 ---
 

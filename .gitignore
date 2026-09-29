@@ -30,3 +30,7 @@ htmlcov/
 .coverage
 
 raven_reports/
+
+# Benchmark output (machine-readable results are non-deterministic in timing;
+# regenerate with `python -m benchmark --out benchmark/results/latest.json`)
+benchmark/results/

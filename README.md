@@ -110,6 +110,49 @@ pip install -r requirements-dev.txt
 python -m pytest            # unit + integration (real local servers) + regression
 ```
 
+## Assessment benchmark
+
+`benchmark/` measures Raven's **actual assessment outcomes** on a fixed set of controlled, local,
+authorized scenarios — not whether individual functions return expected values (the test suite does
+that). Each scenario runs the real pipeline (intake → analysis → planner → gateway → agents →
+independent validation → coverage → report) against a synthetic fixture and compares the resulting
+`AssessmentState` and rendered report to a declared expected outcome.
+
+```bash
+python -m benchmark                    # run all scenarios, print a summary
+python -m benchmark --list             # list scenarios without running
+python -m benchmark --scenario source-vulns --scenario network-redis   # run a subset
+python -m benchmark --out benchmark/results/latest.json                # also write JSON
+```
+
+The suite spans web exposure, web-security configuration, REST and GraphQL input testing, network
+service identification, source secrets/dependencies/config/permissions, and static binary analysis,
+with **positive** cases (a known condition must be confirmed), **negative** cases (nothing may be
+confirmed — the false-positive gate), an **inconclusive** case (a pattern is seen but exploitability
+is unproven), and **partial/gated** cases (e.g. active injection correctly disabled at low risk). It
+exits non-zero if any scenario that ran fails.
+
+Each scenario records, and the summary aggregates:
+
+- **detection** — expected findings that were produced *and* independently validated to the expected
+  verdict (a missing finding is distinguished from a wrong verdict);
+- **coverage** — per-surface coverage classified honestly (an over-claim such as `NOT_ASSESSED`
+  reported as `ASSESSED`, or the reverse, fails);
+- **false-positive gate** — forbidden findings that were (correctly) never confirmed in negative cases;
+- **report consistency** — every confirmed finding appears in the report, and the report's headline
+  counts and coverage table match the persisted state;
+- **unexpected-confirmed** — confirmed findings a scenario did not enumerate, surfaced for review
+  (for the current fixtures this is 0; a non-zero value flags a new true finding *or* a regression);
+- tool-call count and wall-clock duration per scenario.
+
+**What it does not measure / not yet benchmarked:** it makes no claim about real-world targets — it
+establishes *repeatable behaviour on a defined set of controlled scenarios only*. The current set is
+small, so it does not support a statistically meaningful population false-positive or detection rate;
+the false-positive signal is the explicit negative-case gate, not a rate. Not yet benchmarked:
+authenticated/authorization testing (unimplemented), injection types beyond SQLi/XSS/SSRF, GraphQL
+mutation testing (a documented gap), Mach-O/PE import hardening facets, container/cloud/Kubernetes
+targets, and — on a non-POSIX host — the SUID file-permission scenario (skipped, not failed).
+
 ## Current limitations (honest list)
 
 - **Not implemented:** authorization/access-control testing, authenticated testing, and injection types

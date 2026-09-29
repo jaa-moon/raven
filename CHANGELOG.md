@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased - Reproducible assessment benchmark
+
+A new `benchmark/` package measures Raven's *actual assessment outcomes* on a fixed set of controlled,
+local, authorized scenarios by running the real pipeline (intake → analysis → planner → gateway →
+agents → independent validation → coverage → report) end to end and comparing the resulting
+`AssessmentState` and rendered report to a declared expected outcome. It is a pure observer — it never
+fabricates a finding, relaxes a control, or changes the assessment architecture — and reuses the
+existing test fixtures so it exercises the same controlled targets the integration suite already trusts.
+
+### Added
+- **`benchmark/` package**: `models.py` (`Scenario`/`ExpectedFinding`/`ScenarioResult`, scenario
+  validation, and the deterministic `evaluate()` comparison), `scenarios.py` (13 scenarios across web
+  exposure, web-security config, REST + GraphQL input testing, network service identification, source
+  secrets/deps/config/permissions, and static binary analysis — with positive, negative, inconclusive
+  and partial/gated cases), `runner.py` (drives `run_assessment`, collects metrics, aggregates), and a
+  `python -m benchmark` CLI (`--list`/`--scenario`/`--out`) that isolates state under a temp
+  `RAVEN_HOME` and returns a non-zero exit code on any failure.
+- **Measured per scenario and aggregated**: detection accuracy (finding produced *and* validated to the
+  expected verdict, missing vs. wrong-verdict distinguished), coverage-classification accuracy,
+  a false-positive gate (forbidden findings never confirmed in negative cases), report↔state
+  consistency, an `unexpected-confirmed` review list (0 for the current fixtures), and tool-call
+  count + duration.
+- **`tests/unit/test_benchmark.py`** (15 tests): scenario loading/validation, the expected-vs-actual
+  comparison (including multi-candidate and coverage-over-claim cases), JSON serialization, setup-
+  failure and POSIX-skip handling, fixture cleanup, and exit codes — all against synthetic states, no
+  real assessment run.
+- Honest scoping documented in `README.md`, `benchmark/README.md` and `PROJECT_STATUS.md`: the
+  benchmark establishes repeatable behaviour on controlled scenarios only, makes no real-world-target
+  claim, and is too small for a population-level false-positive/detection rate.
+
 ## Unreleased - Binary target file-permission auditing
 
 The `permission_scan` tool already declared `binary` an in-scope target type and already supported a
