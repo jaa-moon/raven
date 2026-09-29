@@ -7,6 +7,10 @@ New file (not an edit to test_assessments.py) so it stays independent of
 concurrent, unrelated work in this directory.
 """
 
+import os
+
+import pytest
+
 from core.models import CoverageStatus, FindingStatus
 from reporting.generator import render_markdown
 from tests.fixtures_binary import build_elf64, build_pe
@@ -30,10 +34,20 @@ async def test_elf_binary_target_is_classified_and_fully_assessed(tmp_path):
 
     ran_agents = {t.agent for t in state.tasks}
     assert "binary_assessment" in ran_agents
-    assert all(t.status == "done" for t in state.tasks if t.agent == "binary_assessment")
+    binary_tasks = [t for t in state.tasks if t.agent == "binary_assessment"]
+    # Every static-analysis facet completes on a well-formed ELF. File-permission
+    # auditing is POSIX-only, so on a non-POSIX host it is honestly BLOCKED, not done.
+    static_facets = [t for t in binary_tasks if t.capability != "permission_audit"]
+    assert static_facets and all(t.status == "done" for t in static_facets)
+    perms = next(t for t in binary_tasks if t.capability == "permission_audit")
+    assert perms.status == ("done" if os.name == "posix" else "blocked")
 
     cov = {c.surface: c for c in state.coverage}
     assert cov["Binary analysis"].status == CoverageStatus.ASSESSED
+    # The binary's own filesystem permissions are now a wired, computed surface —
+    # never left silently at NOT_ASSESSED as if no check existed.
+    expected_perms = CoverageStatus.ASSESSED if os.name == "posix" else CoverageStatus.BLOCKED
+    assert cov["File permissions"].status == expected_perms
     # Dynamic/execution-based analysis is a distinct, unimplemented surface: it must
     # be honestly NOT_ASSESSED, never silently rendered as clean or as ASSESSED.
     assert cov["Process & CLI"].status == CoverageStatus.NOT_ASSESSED
@@ -64,6 +78,37 @@ async def test_elf_binary_with_missing_hardening_is_confirmed_via_independent_va
 
     md = render_markdown(state)
     assert "BinaryHardeningGap" in md or "Missing" in md
+    assert "clean" not in md.lower()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="File-permission auditing is POSIX-only.")
+async def test_elf_suid_binary_permission_is_raised_and_independently_confirmed(tmp_path):
+    # A SUID executable is a canonical local-privilege-escalation surface. Raven should
+    # discover it, raise a candidate, and only report it CONFIRMED after an independent
+    # re-audit re-observes the same mode on the same file.
+    from core.assessment import run_assessment
+    binpath = tmp_path / "suid.elf"
+    binpath.write_bytes(build_elf64(nx_disabled=False, relro="full", pie=True))
+    os.chmod(binpath, 0o4755)  # SUID + rwxr-xr-x; still world-readable so parsing succeeds
+
+    state = await run_assessment(str(binpath), **FAST)
+
+    perms = [f for f in state.findings if f.category == "InsecurePermissions"]
+    assert perms, "expected a permission finding for a SUID binary"
+    suid = [f for f in perms if "SUID" in f.signal.get("issue", "")]
+    assert suid, "the SUID bit should be flagged specifically"
+    f = suid[0]
+    assert f.status == FindingStatus.CONFIRMED, "must be confirmed by independent re-audit"
+    assert f.validator == "file_permission"
+    assert f.evidence, "a confirmed finding must carry re-audit evidence"
+
+    perms_task = next(t for t in state.tasks if t.agent == "binary_assessment"
+                      and t.capability == "permission_audit")
+    assert perms_task.status == "done"
+    cov = {c.surface: c for c in state.coverage}
+    assert cov["File permissions"].status == CoverageStatus.ASSESSED
+
+    md = render_markdown(state)
     assert "clean" not in md.lower()
 
 

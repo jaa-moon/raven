@@ -42,7 +42,8 @@ class BinaryAssessmentAgent(Agent):
     description = ("Static analysis of a single binary executable: format/architecture identification, "
                    "header-level hardening indicators, imported-library enumeration, and embedded-string "
                    "inspection. Never executes the target binary.")
-    capabilities = ["binary_format_id", "binary_hardening", "binary_imports", "binary_strings"]
+    capabilities = ["binary_format_id", "binary_hardening", "binary_imports", "binary_strings",
+                    "permission_audit"]
 
     def applies(self, profile: TargetProfile) -> bool:
         return profile.target_type == "binary"
@@ -58,6 +59,15 @@ class BinaryAssessmentAgent(Agent):
                       "Enumerate imported shared libraries", priority=60),
             self.task("strings", "binary_strings", "Binary analysis",
                       "Extract and inspect embedded printable strings", priority=50),
+            # The binary file itself is a filesystem object: a SUID/SGID or world-writable
+            # executable is a direct local-privilege-escalation surface. The permission_scan
+            # tool already accepts a single file and declares binary as an in-scope target
+            # type; auditing it here means the "File permissions" coverage surface reflects a
+            # real check instead of sitting at NOT_ASSESSED. POSIX-only: on other platforms
+            # the gateway reports the tool unavailable and the task is honestly BLOCKED.
+            self.task("perms", "permission_audit", "File permissions",
+                      "Audit the binary file's own filesystem permissions (SUID/SGID, world-writable)",
+                      priority=40),
         ]
 
     async def run(self, task: TestTask, ctx: AgentContext) -> AgentResult:
@@ -130,6 +140,30 @@ class BinaryAssessmentAgent(Agent):
         plural = "library" if len(needed) == 1 else "libraries"
         ctx.observe("binary.imports", "Binary analysis", f"{len(needed)} imported {plural}: {needed[:15]}")
         return AgentResult(summary=f"{len(needed)} imported {plural}")
+
+    async def _perms(self, ctx: AgentContext, path: str, data: Dict[str, Any]) -> AgentResult:
+        issues = data.get("issues", [])
+        n = 0
+        for i in issues:
+            # signal path is the file the scanner actually reported the issue on, so the
+            # independent re-audit in validation/checks_static.py::_v_file_permission can
+            # re-observe that exact file rather than guessing.
+            f = ctx.candidate(
+                title=f"{i.get('issue', 'Insecure permission')}: {os.path.basename(i.get('file', path))}",
+                category="InsecurePermissions",
+                severity=_SEV.get(str(i.get("severity", "medium")).lower(), Severity.MEDIUM),
+                surface="File permissions", location=i.get("file", path),
+                description=i.get("details", ""),
+                impact="A SUID/SGID or world-writable executable can be leveraged for local privilege "
+                       "escalation or tampering; this is a filesystem-permission risk, not proof of a "
+                       "code-level vulnerability.",
+                remediation="Restrict permissions (e.g. chmod 755 and drop the SUID/SGID bit unless "
+                            "strictly required).",
+                signal={"validator": "file_permission", "path": i.get("file", path),
+                        "issue": i.get("issue", "")})
+            n += bool(f)
+        ctx.observe("perms.scan", "File permissions", f"{len(issues)} permission issue(s) found.")
+        return AgentResult(summary=f"{n} permission issue(s)")
 
     async def _strings(self, ctx: AgentContext, path: str, data: Dict[str, Any]) -> AgentResult:
         matches = data.get("matches", [])

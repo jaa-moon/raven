@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Binary target file-permission auditing
+
+The `permission_scan` tool already declared `binary` an in-scope target type and already supported a
+single-file target, but no agent requested it for a binary, so the "File permissions" coverage surface
+sat at `NOT_ASSESSED` for every binary assessment even though the check existed. This wires it up with no
+new tool, dependency, or gateway change — the audit rides the existing capability/scope/budget/validation
+path.
+
+### Added
+- **`agents/binary.py`**: `BinaryAssessmentAgent` now requests the `permission_audit` capability on the
+  target binary's own path (new lowest-priority `perms` task and `_perms` step). A SUID/SGID or
+  world-writable executable is a direct local-privilege-escalation surface; findings are raised only as
+  candidates and independently re-audited by the existing `validation/checks_static.py::_v_file_permission`
+  validator before they can be `CONFIRMED`. POSIX-only: on a non-POSIX host the gateway reports the tool
+  unavailable (`requirements=["os:posix"]`) and the task is honestly `BLOCKED`, so the "File permissions"
+  surface is `ASSESSED` on POSIX and `BLOCKED` elsewhere — never silently `NOT_ASSESSED`.
+- **Tests** (`tests/integration/test_binary_assessment.py`): the full-assessment test now asserts the
+  file-permission surface is wired (ASSESSED on POSIX / BLOCKED otherwise); a new POSIX-only test creates a
+  `0o4755` SUID ELF and asserts the finding is raised and independently `CONFIRMED` with evidence.
+
 ## Unreleased - GraphQL input discovery v1 (query arguments, SQLi + SSRF)
 
 Implements the GraphQL variable discovery previously investigated and deferred (see "Investigated,

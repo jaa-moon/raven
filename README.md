@@ -83,9 +83,11 @@ are documented gaps, not silent omissions.
 
 `BinaryAssessmentAgent` (`agents/binary.py`) assesses a single authorized local ELF/PE/Mach-O executable:
 format and architecture identification, header-level hardening indicators (ELF NX-stack/RELRO-proxy/
-PIE-proxy; PE ASLR/DEP), ELF `DT_NEEDED` imported-library enumeration, and embedded-string inspection
+PIE-proxy; PE ASLR/DEP), ELF `DT_NEEDED` imported-library enumeration, embedded-string inspection
 (secret-shaped and internal-host-shaped strings are flagged and redacted before they reach a report, the
-same way `tools/secret_scanner.py` redacts source-code secrets). All parsing is hand-rolled with `struct` —
+same way `tools/secret_scanner.py` redacts source-code secrets), and an audit of the binary file's **own
+filesystem permissions** (SUID/SGID, world-writable — a direct local-privilege-escalation surface, POSIX-only
+and reported as `BLOCKED` elsewhere). All parsing is hand-rolled with `struct` —
 no new dependency. **The target binary is never executed, mapped, or sandboxed** — this is a static-only
 first milestone. Not implemented: PE import-table parsing, Mach-O load-command parsing (hardening/imports
 stay unsupported for Mach-O), and all dynamic/execution-based analysis (the `Process & CLI` coverage surface
