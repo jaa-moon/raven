@@ -53,6 +53,23 @@ class FollowupAgent(Agent):
         return AgentResult(success=res.ok, summary=str(res.data))
 
 
+class RankedAgent(Agent):
+    """Proposes a fixed set of tasks with explicit (priority, cost) in a known
+    insertion order, so the deterministic selection contract can be pinned exactly.
+    Insertion order below is A, B, C, D, E."""
+    name, capabilities = "ranked", ["scan"]
+    SPECS = [("A", 80, 1), ("B", 80, 1), ("C", 80, 3), ("D", 90, 5), ("E", 80, 2)]
+
+    def applies(self, p):
+        return True
+
+    def propose_tasks(self, state):
+        return [self.task(t, "scan", "HTTP", t, priority=pr, cost=co) for (t, pr, co) in self.SPECS]
+
+    async def run(self, task, ctx):
+        return AgentResult()
+
+
 def _registry(*agents):
     r = AgentRegistry()
     for a in agents:
@@ -208,6 +225,57 @@ def test_llm_json_extraction_and_kind():
     class Api(FakeProvider): provider_name = "OpenAI"
     class Local(FakeProvider): provider_name = "Ollama"
     assert LLM(Api("{}")).kind == "api" and LLM(Local("{}")).kind == "local" and LLM(None).kind == "none"
+
+
+async def test_next_task_ranking_is_deterministic_priority_then_cost_then_fifo(tmp_path):
+    """The planner's next-task contract, pinned exactly: highest priority first;
+    at equal priority the cheaper task (lower cost) first; at equal priority AND
+    cost the earlier-discovered task first (FIFO by insertion index). This ordering
+    is deterministic and fully explainable from each task's own priority/cost, and
+    must not drift silently. With ample budget nothing is dropped, so every task is
+    eventually selected -- FIFO ties are an ordering rule, never starvation."""
+    b = BudgetManager(BudgetLimits(max_tool_calls=1000))       # status "ok" -> floor 0, drops nothing
+    state, pl = _planner(b, agents=_registry(RankedAgent()), tmp=tmp_path)
+    added = await pl.replan(state, "test")
+    assert len(added) == 5 and all(t.status == "pending" for t in added)
+
+    order = []
+    while True:
+        t = pl.next_task(state)
+        if t is None:
+            break
+        order.append(t.title)
+        t.status = "done"                                      # simulate execution so it leaves the queue
+    # D (p90) first; then the p80 group by cost asc: A,B (cost1, FIFO A<B), E (cost2), C (cost3).
+    assert order == ["D", "A", "B", "E", "C"]
+
+
+async def test_next_task_only_ever_selects_pending_tasks(tmp_path):
+    """Blocked/skipped/done tasks are never returned for execution -- selection is
+    strictly over the pending queue."""
+    b = BudgetManager(BudgetLimits(max_tool_calls=1000))
+    state, pl = _planner(b, agents=_registry(RankedAgent()), tmp=tmp_path)
+    await pl.replan(state, "test")
+    for t in state.tasks:
+        t.status = "done"
+    target = state.tasks[2]
+    target.status = "pending"
+    assert pl.next_task(state) is target                       # the lone pending task, regardless of priority
+    target.status = "blocked"
+    assert pl.next_task(state) is None                         # nothing pending -> nothing selected
+
+
+async def test_replan_does_not_re_add_already_known_tasks(tmp_path):
+    """Re-planning is idempotent for unchanged proposals: a task key already in the
+    plan is never duplicated, so repeated replans (every loop iteration) don't inflate
+    the queue."""
+    b = BudgetManager(BudgetLimits(max_tool_calls=1000))
+    state, pl = _planner(b, agents=_registry(RankedAgent()), tmp=tmp_path)
+    first = await pl.replan(state, "first")
+    second = await pl.replan(state, "second")                  # identical proposals, nothing new discovered
+    assert len(first) == 5 and second == []
+    keys = [t.key for t in state.tasks]
+    assert len(keys) == len(set(keys)) == 5
 
 
 async def test_llm_cannot_inject_free_text_technologies_into_the_profile(tmp_path):
