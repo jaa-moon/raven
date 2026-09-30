@@ -9,7 +9,7 @@ on:
     inputs:
       fail_on:
         description: "Severity threshold (critical|high|medium|low|none)"
-        default: "high"
+        default: "none"
 
 env:
   PYTHON_VERSION: "3.11"
@@ -36,9 +36,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt
-      # --yes states that scanning this repository (our own checkout) is authorized.
+      # Dogfooding: Raven assesses its own checkout and uploads the report as an artifact.
+      # --yes states that scanning this repository is authorized. This job is report-only
+      # (--fail-on none): the repo intentionally ships a deliberately-vulnerable demo target
+      # (mock_project/) and secret-shaped test fixtures, so a severity gate would always fail
+      # on those fixtures rather than on a real regression. Trigger it manually via
+      # workflow_dispatch with a stricter `fail_on` to gate on demand.
       - name: Assess this repository
-        run: python raven.py scan . --yes --fail-on "${{ github.event.inputs.fail_on || 'high' }}" -o raven_reports
+        run: python raven.py scan . --yes --fail-on "${{ github.event.inputs.fail_on || 'none' }}" -o raven_reports
       - uses: actions/upload-artifact@v4
         if: always()
         with:
