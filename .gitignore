@@ -17,9 +17,10 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# IDE / OS
+# IDE / OS / local tooling
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
 
